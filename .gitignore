@@ -45,3 +45,14 @@ log.txt
 # Временные файлы
 *.tmp
 *.temp
+
+# Бинарники и артефакты запуска
+AyuGram.exe
+AyuGram.exe.bak-previous
+AyuGram.exe.lnk
+python314._pth
+watchdog.pid
+restart-monitor.lock
+tools/watchdog.pid
+*.lnk
+*.bak-previous
