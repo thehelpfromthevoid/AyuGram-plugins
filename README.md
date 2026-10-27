@@ -7,6 +7,9 @@
 
 | Папка | Содержимое |
 |-------|------------|
+| `cpp/tdesktop/ayu` | C++ исходники AyuGram Desktop (tdesktop) — 331 файлов, 13.6 MB |
+| `cpp/ayugram-opensource/ayu` | C++ исходники AyuGram-OpenSource — 375 файлов, 4.2 MB |
+| `cpp/tdesktop_full/ayu` | C++ исходники tdesktop_full — 238 файлов, 12.9 MB |
 | `standalone/` | Python standalone host |
 | `ayugram_compat/` | Python-совместимость с Android API Telegram |
 | `examples/` | Примеры плагинов |
@@ -15,7 +18,7 @@
 | `ui/` | UI компоненты Python хоста |
 | `android/`, `java/`, `org/` | Android API заглушки для совместимости |
 | `docs/` | Документация |
-| `BUILD_OWNERSHIP.md` | Что исправлено, как собирать, статус tdata |
+| `BUILD_OWNERSHIP.md` | Кто владеет сборкой, что исправлено, как собирать |
 | `.gitignore` | Исключения: tdata/, .exe, .dll, build-артефакты |
 
 ## Исправления в этом репозитории
