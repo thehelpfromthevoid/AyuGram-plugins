@@ -1,0 +1,47 @@
+# tdata — пользовательские файлы авторизации, НЕ коммитить
+tdata/
+
+# Сборки и бинарники
+*.exe
+*.dll
+*.pyd
+*.zip
+*.7z
+*.rar
+*.iso
+
+# PyInstaller / сборка
+build/
+dist/
+*.spec
+_ploy/
+_pyi_work/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.tox/
+.venv/
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Логи
+*.log
+log.txt
+
+# Временные файлы
+*.tmp
+*.temp

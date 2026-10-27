@@ -1,0 +1,18 @@
+{
+  "id": "com.ayugram.translator-demo",
+  "name": "Переводчик (демо)",
+  "description": "Переписывает исходящие /en /ru /tr через on_message_sending. В приложении те же команды уже встроены в Настройки → Общие.",
+  "author": "@ayugram",
+  "version": "1.1.0",
+  "min_app_version": "5.10",
+  "api_version": 1,
+  "entry": "main.py",
+  "hooks": [
+    "on_message_sending"
+  ],
+  "permissions": [
+    "ui.toast",
+    "net.http",
+    "net.http:translate.googleapis.com"
+  ]
+}
