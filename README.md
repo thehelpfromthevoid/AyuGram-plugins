@@ -1,6 +1,6 @@
-# AyuGram Desktop — Plugins & Open Source
+# AyuGram Desktop - Plugins & Open Source
 
-Проект AyuGram Desktop — клиент Telegram для десктопа с плагин-системой на Python.
+Проект AyuGram Desktop - клиент Telegram для десктопа с плагин-системой на Python.
 Репозиторий содержит Python standalone host, C++ исходники AyuGram-движка и документацию по сборке.
 
 ## Структура репозитория
@@ -65,7 +65,7 @@ run_build_release.bat
 
 Не коммитится в git из-за размера (.gitignore исключает .exe). Доступен локально по пути выше.
 
-## tdata — файлы авторизации
+## tdata - файлы авторизации
 
 Папка `tdata/` содержит личные файлы авторизации пользователя.
 **Не коммитится, не читается, не изменяется.** Защищена `.gitignore`.
@@ -77,7 +77,7 @@ cd D:\Users\koliy\AyuGram
 python tools/selftest.py
 ```
 
-Результат: 51 passed, 3 failed (все 3 — предудущие ошибки `python314.dll`, не связаны с изменениями).
+Результат: 51 passed, 3 failed (все 3 - предудущие ошибки `python314.dll`, не связаны с изменениями).
 
 ## Лицензия
 
