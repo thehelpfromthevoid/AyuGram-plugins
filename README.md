@@ -1,14 +1,14 @@
-# AyuGram Desktop — Plugins & Open Source
+# AyuGram Desktop - Plugins & Open Source
 
 ## О проекте
 
-AyuGram Desktop — клиент Telegram для десктопа на базе Telegram Desktop (Qt/C++), дополненный плагин-системой на Python.
+AyuGram Desktop - клиент Telegram для десктопа на базе Telegram Desktop (Qt/C++), дополненный плагин-системой на Python.
 
 Репозиторий содержит:
-- **Открытые исходники C++** (3 источника: tdesktop, AyuGram-OpenSource, tdesktop_full) — в папке `cpp/`
-- **Python standalone host** — отдельный Python-клиент для разработки и тестирования плагинов
-- **Документацию** — BUILD_OWNERSHIP.md, API reference, quickstart и др.
-- **Готовую сборку** — Release-бинарник в разделе Releases (тег v1.0.0)
+- **Открытые исходники C++** (3 источника: tdesktop, AyuGram-OpenSource, tdesktop_full) - в папке `cpp/`
+- **Python standalone host** - отдельный Python-клиент для разработки и тестирования плагинов
+- **Документацию** - BUILD_OWNERSHIP.md, API reference, quickstart и др.
+- **Готовую сборку** - Release-бинарник в разделе Releases (тег v1.0.0)
 
 Автор: @CE0fbi
 
@@ -52,9 +52,9 @@ AyuGram-plugins/
 
 | Исправление | Что сделано | Файлы |
 |-------------|-------------|-------|
-| Дубликат заголовка "Плагины" | Удалён `addSubsectionTitle(tr::ayu_PluginsHeader())` — он дублировал кнопку "Плагины" в разделе Ayu и на странице плагинов | `settings_ayu.cpp`, `plugins_section.cpp` |
+| Дубликат заголовка "Плагины" | Удалён `addSubsectionTitle(tr::ayu_PluginsHeader())` - он дублировал кнопку "Плагины" в разделе Ayu и на странице плагинов | `settings_ayu.cpp`, `plugins_section.cpp` |
 | Цветной статус плагина | Добавлена строка статуса под каждым плагином в списке: ON (загружен), off (отключён), ERR (ошибка) | `plugins_section.cpp` |
-| Поиск плагинов в глобальном поиске | Добавлены записи в обработчик `SearchContext` — плагины находятся через поиск по настройкам | `plugins_section.cpp` |
+| Поиск плагинов в глобальном поиске | Добавлены записи в обработчик `SearchContext` - плагины находятся через поиск по настройкам | `plugins_section.cpp` |
 
 **Требуется перекомпиляция** для вступления C++ изменений в силу.
 
@@ -65,7 +65,7 @@ AyuGram-plugins/
 cd D:\Users\koliy\AyuGram
 python tools/selftest.py
 ```
-Результат: 51 passed, 3 failed (все 3 — предудущие ошибки `python314.dll`, не связаны с изменениями).
+Результат: 51 passed, 3 failed (все 3 - предудущие ошибки `python314.dll`, не связаны с изменениями).
 
 ### C++ AyuGram Desktop
 ```cmd
