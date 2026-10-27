@@ -48,6 +48,7 @@ log.txt
 
 # Бинарники и артефакты запуска
 AyuGram.exe
+!release/AyuGram.exe
 AyuGram.exe.bak-previous
 AyuGram.exe.lnk
 python314._pth
