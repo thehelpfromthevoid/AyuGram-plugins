@@ -4,10 +4,10 @@
 
 | Компонент | Путь к исходникам | Владелец | Статус |
 |-----------|-------------------|----------|--------|
-| Python standalone host | `D:\Users\koliy\AyuGram\` | koliy | ✅ В репозитории GitHub |
-| C++ / Qt desktop app (tdesktop) | `D:\TBuild\tdesktop\Telegram\SourceFiles\ayu/` | koliy | Локально, исправления применены |
-| C++ / Qt desktop app (AyuGram-OpenSource) | `D:\AyuGram-OpenSource\SourceFiles\ayu/` | koliy | Локально, исправления применены |
-| C++ / Qt desktop app (tdesktop_full) | `D:\TBuild\tdesktop_full\Telegram\SourceFiles\ayu/` | koliy | Локально, исправления применены |
+| C++ / Qt desktop app (tdesktop) | `cpp/tdesktop/ayu` | koliy | ✅ В репозитории GitHub |
+| C++ / Qt desktop app (AyuGram-OpenSource) | `cpp/ayugram-opensource/ayu` | koliy | ✅ В репозитории GitHub |
+| C++ / Qt desktop app (tdesktop_full) | `cpp/tdesktop_full/ayu` | koliy | ✅ В репозитории GitHub |
+| Python standalone host | `standalone/` | koliy | ✅ В репозитории GitHub |
 
 **Канонический Release-бинарник:** `D:\TBuild\tdesktop\out\Release\AyuGram.exe` (228 МБ)
 
@@ -55,7 +55,7 @@
 
 ### Файл: `standalone/plugin_loader.py`
 **Проблема:** каждый вызов `scan()` полностью перечитывал и перепарсивал все манифесты и entry-скрипты всех плагинов, даже не изменённые.
-**Исправление:** добавлен `self._fingerprints` (pid → (mtime_ns, size)). При `scan()` сравниваются отпечатки — перепарсиваются только новые/изменённые/удалённые плагины. Неизменённые оставляются в памяти без чтения с диска и без `exec()`.
+**Исправление:** добавлен `self._fingerprints` (pid → (mtime_ns, size)). При `scan()` сравниваются отпечатки — перепарсиваются только новые/изменённые/удалённые плагины. Неизменённые остаются в памяти без чтения с диска и без `exec()`.
 
 ### Файл: `%APPDATA%\AyuGramDesktop\plugins\custom_nickname\main.py`
 **Проблема:** плагин спамил мостом "Desktop bridge: unsupported request Placeholder" каждую секунду.
@@ -64,13 +64,13 @@
 
 ---
 
-## 3. Что исправлено (C++ AyuGram Desktop, локально, не в репозитории)
+## 3. Что исправлено (C++ AyuGram Desktop, все 3 источника в репозитории)
 
-Исправления применены к исходникам в трёх местах, но НЕ выложены на GitHub (пользователь попросил убрать плагины из открытого кода):
+Исправления применены к исходникам в трёх местах в `cpp/`:
 
-1. `D:\TBuild\tdesktop\Telegram\SourceFiles\ayu/`
-2. `D:\AyuGram-OpenSource\SourceFiles\ayu/`
-3. `D:\TBuild\tdesktop_full\Telegram\SourceFiles\ayu/`
+1. `cpp/tdesktop/ayu/`
+2. `cpp/ayugram-opensource/ayu/`
+3. `cpp/tdesktop_full/ayu/`
 
 | Исправление | Что сделано |
 |-------------|-------------|
@@ -105,7 +105,12 @@ run_build_release.bat
 
 ---
 
-## 5. tdata — файлы авторизации
+## 5. Релиз-бинарник
+
+Готовый Release-бинарник: `D:\TBuild\tdesktop\out\Release\AyuGram.exe` (228 МБ)
+Не коммитится в git из-за размера (.gitignore исключает .exe). Доступен локально.
+
+## 6. tdata — файлы авторизации
 
 **Папка `tdata/` НЕ была тронута:**
 - Не читалась
@@ -117,17 +122,16 @@ run_build_release.bat
 
 ---
 
-## 6. GitHub репозиторий
+## 7. GitHub репозиторий
 
 - URL: `https://github.com/thehelpfromthevoid/AyuGram-plugins`
 - Ветка: `master`
 - Тег: `v1.0.0`
-- Последний коммит: `23fae7b` — "Remove cpp/ open source from repo - user plugins stay local"
-- Python standalone host + документация
+- Последний коммит: `e6bac1e` — "Restore cpp/ open source - all 3 C++ sources back on GitHub"
 
 ---
 
-## 7. Верификация
+## 8. Верификация
 
 | Проверка | Результат |
 |----------|-----------|
