@@ -1,0 +1,12 @@
+{
+  "id": "animtou",
+  "name": "animtou (Android-only)",
+  "description": "Animated touch ripples. ANDROID ONLY — requires Java/Android APIs. Will not load on Desktop.",
+  "author": "@jaxbastard & @zwylair",
+  "version": "2.2.1-desktop-stub",
+  "min_app_version": "5.10",
+  "api_version": 1,
+  "entry": "main.py",
+  "hooks": [],
+  "permissions": []
+}

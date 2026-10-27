@@ -1,0 +1,12 @@
+{
+  "id": "com.ayugram.hello-toast",
+  "name": "Привет-тост",
+  "description": "Показывает тост, когда кто-то пишет hello/привет. Демо on_message (по умолчанию выкл.).",
+  "author": "@ayugram",
+  "version": "1.0.0",
+  "min_app_version": "5.10",
+  "api_version": 1,
+  "entry": "main.py",
+  "hooks": ["on_message"],
+  "permissions": ["ui.toast"]
+}
