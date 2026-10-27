@@ -1,0 +1,10 @@
+{
+	"id": "hook_probe",
+	"name": "Hook Probe (диагностика)",
+	"description": "Пишет в hook_probe.log каждый хук, который приложение реально передаёт плагинам.",
+	"author": "AyuGram Desktop",
+	"version": "1.0",
+	"entry": "main.py",
+	"desktop_only": true,
+	"permissions": ["storage.write"]
+}
