@@ -1,0 +1,14 @@
+{
+  "id": "tpl.pkgstyle",
+  "name": "Package template",
+  "description": "__init__.py entry + local helper module",
+  "author": "@ayugram",
+  "version": "1.0.0",
+  "entry": "__init__.py",
+  "hooks": [
+    "on_message_sending"
+  ],
+  "permissions": [
+    "ui.toast"
+  ]
+}

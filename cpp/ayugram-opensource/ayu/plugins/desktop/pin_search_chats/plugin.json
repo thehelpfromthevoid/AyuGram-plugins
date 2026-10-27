@@ -1,0 +1,9 @@
+{
+  "id": "pin_search_chats",
+  "name": "Pin in Search",
+  "description": "Закрепляет чаты вверху истории поиска, чтобы они не уходили вниз. Перенос с Android на Desktop: @CE0fbi.",
+  "author": "wKey ( @exterawKey ) | перенос: @CE0fbi",
+  "version": "1.0.0-desktop",
+  "entry": "main.py",
+  "desktop_only": true
+}
