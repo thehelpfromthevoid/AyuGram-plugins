@@ -1,0 +1,12 @@
+{
+  "id": "com.ayugram.macros",
+  "name": "Макросы",
+  "description": "Создание и запуск текстовых макросов: /macro save имя текст, /m имя, /macro list",
+  "author": "@ayugram",
+  "version": "1.0.0",
+  "min_app_version": "5.10",
+  "api_version": 1,
+  "entry": "main.py",
+  "hooks": ["on_message_sending"],
+  "permissions": ["ui.toast", "storage.write", "storage.read"]
+}
