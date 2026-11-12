@@ -2,13 +2,13 @@
 
 ## Module `ayu_api`
 
-- `hook(name: str, fn)` — subscribe. Names: `on_message`, `on_message_sending`,
+- `hook(name: str, fn)` - subscribe. Names: `on_message`, `on_message_sending`,
   `on_message_deleted`, `on_chat_opened`, `on_app_start`, `on_app_stop`, `on_setting_changed`.
   Mobile spellings are normalized (`before_send_message`, `new_message`,
   `message_deleted`, `chat_open` …); pure Java/TL hooks are accepted and
   ignored with a log line instead of failing the load.
-- `toast(text: str)` — show toast on main thread.
-- `log(text: str)` — write to debug log.
+- `toast(text: str)` - show toast on main thread.
+- `log(text: str)` - write to debug log.
 - `Message { msg_id, peer_id, from_id, text, date, out }`
 - `Chat { peer_id, title, type }`
 
@@ -17,20 +17,20 @@
 
 ## Compat `ayugram_compat`
 
-- `base_plugin.BasePlugin` — mobile-compatible base (lifecycle, send hooks, settings helpers).
-- `base_plugin.Plugin` — legacy dataclass alias.
+- `base_plugin.BasePlugin` - mobile-compatible base (lifecycle, send hooks, settings helpers).
+- `base_plugin.Plugin` - legacy dataclass alias.
 - Top-level `base_plugin.py` re-exports `BasePlugin` so `from base_plugin import BasePlugin` works.
-- `hook_utils.hook(name)` / `on_hook` — alias to `ayu_api.hook`.
-- `android_utils.toast/log/get_pref/set_pref` — desktop adaptations.
+- `hook_utils.hook(name)` / `on_hook` - alias to `ayu_api.hook`.
+- `android_utils.toast/log/get_pref/set_pref` - desktop adaptations.
   `require_android_context()` / `get_context()` / `get_activity()` return None.
 - `client_utils` controllers (`get_messages_controller()`, …) and
   `hook_utils` reflection (`find_class()`, `get_method()`, …) return
-  chainable stubs, never None — `a.b().c()` chains survive load.
+  chainable stubs, never None - `a.b().c()` chains survive load.
 - `BasePlugin.hook_method()` / `.client()` raise `NotImplementedError`
-  with a clear message — guard with try/except and provide a desktop
+  with a clear message - guard with try/except and provide a desktop
   fallback (see migration doc).
 - `java` / `android` refuse with a clear Android-only `ImportError`
-  (the bridge maps it to a friendly load error) — guard optional Java
+  (the bridge maps it to a friendly load error) - guard optional Java
   usage with try/except ImportError. `androidx.*`, `com.*`, `org.*`,
   `ui`, `dalvik`, `kotlin*`, `okhttp3`, `javax.*` import as live no-op
   stubs (callable, chainable, falsy). Real files on sys.path (e.g. a
@@ -44,7 +44,7 @@
   plugin settings on load (no Android UI is built).
 - `ui.bulletin.BulletinHelper`: `show_info/error/success/simple/two_line/
   with_button/undo/copied_to_clipboard/link_copied/file_saved_to_gallery/
-  file_saved_to_downloads` — all surface as toasts.
+  file_saved_to_downloads` - all surface as toasts.
 - `ui.alert.AlertDialogBuilder`: chainable builder, `show()` toasts
   title+message, listeners stored but never invoked.
 - `file_utils`: real dirs + `ensure_dir_exists`, `list_dir`,

@@ -45,7 +45,7 @@ def main() -> int:
         for info in loader.scan():
             state = "ERROR:%s" % info.error[:80] if info.error else (
                 "ON" if info.enabled else "off")
-            print("[%s] %s — %s (%s)" % (state, info.name, info.id, info.entry))
+            print("[%s] %s - %s (%s)" % (state, info.name, info.id, info.entry))
         return 0
     sources: list[Path] = []
     if args[:1] == ["--examples"]:

@@ -4,6 +4,8 @@
 // but be respectful and credit the original author.
 //
 // Copyright @Radolyn, 2026
+//
+// AyuGram plugin host for Desktop, (c) @CE0fbi
 #include "ayu/plugins/plugin_manifest.h"
 
 #include "ayu/libs/json.hpp"
@@ -21,6 +23,56 @@ namespace {
 }
 
 } // namespace
+
+bool ManifestRunsHere(const PluginManifest &m) {
+	if (m.platforms.isEmpty()) {
+		return true;
+	}
+	for (const auto &p : m.platforms) {
+		const auto lower = p.toLower();
+		if (lower == u"desktop"_q || lower == u"windows"_q
+			|| lower == u"macos"_q || lower == u"linux"_q
+			|| lower == u"all"_q || lower == u"any"_q) {
+			return true;
+		}
+	}
+	return false;
+}
+
+QStringList ManifestProblems(const PluginManifest &m) {
+	auto out = QStringList();
+	if (!IsValidId(m.id)) {
+		out.append(u"id does not match the app's pattern"_q);
+	}
+	if (m.name.isEmpty() || m.name.size() > 100) {
+		out.append(u"name must be 1..100 chars"_q);
+	}
+	if (m.description.size() > kMaxDescriptionLength) {
+		out.append(u"description longer than "_q
+			+ QString::number(kMaxDescriptionLength) + u" chars"_q);
+	}
+	if (m.entry.isEmpty() || m.entry.contains(u".."_q)) {
+		out.append(u"entry must be a plain file name"_q);
+	}
+	if (m.apiVersion <= 0) {
+		out.append(u"api_version must be a positive number"_q);
+	} else if (m.apiVersion > kPluginApiVersion) {
+		out.append(u"api_version "_q + QString::number(m.apiVersion)
+			+ u" is newer than the app's "_q
+			+ QString::number(kPluginApiVersion) + u": the app will refuse it"_q);
+	}
+	for (const auto &h : m.hooks) {
+		auto id = HookId::OnMessage;
+		if (!HookIdFromString(h, id)) {
+			out.append(u"unknown hook: "_q + h);
+		}
+	}
+	if (!ManifestRunsHere(m)) {
+		out.append(u"built for "_q + m.platforms.join(u", "_q)
+			+ u", not this platform"_q);
+	}
+	return out;
+}
 
 bool ValidateManifest(const PluginManifest &m, QString *error) {
 	auto fail = [&](const QString &e) {
@@ -87,6 +139,13 @@ bool ParseManifestJson(const QByteArray &data, PluginManifest &out, QString *err
 			for (const auto &r : j["requirements"]) {
 				if (r.is_string()) out.requirements.append(QString::fromStdString(r.get<std::string>()));
 			}
+		}
+		if (j.contains("platforms") && j["platforms"].is_array()) {
+			for (const auto &p : j["platforms"]) {
+				if (p.is_string()) out.platforms.append(QString::fromStdString(p.get<std::string>()));
+			}
+		} else if (j.value("desktop_only", false)) {
+			out.platforms.append(u"desktop"_q);
 		}
 		return ValidateManifest(out, error);
 	} catch (const std::exception &e) {

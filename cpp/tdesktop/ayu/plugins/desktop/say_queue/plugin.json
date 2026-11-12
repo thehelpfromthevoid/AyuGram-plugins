@@ -1,9 +1,0 @@
-{
-  "id": "say_queue",
-  "name": "Say Queue",
-  "description": "Пишет сообщения по команде с ограничением скорости: очередь и пауза между отправками, чтобы Telegram не заблокировал аккаунт.",
-  "author": "@CE0fbi",
-  "version": "1.0.0",
-  "entry": "main.py",
-  "desktop_only": true
-}

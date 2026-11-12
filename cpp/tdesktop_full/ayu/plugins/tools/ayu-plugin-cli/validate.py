@@ -17,7 +17,13 @@ def _check_manifest(mj: Path, root: Path) -> None:
     assert isinstance(m, dict), "manifest must be an object"
     assert ID_RE.match(m.get("id", "")), "bad id"
     assert m.get("name"), "bad name"
-    assert m.get("api_version", 1) == 1, "unsupported api_version"
+    # The embedded runtime is kPluginApiVersion = 1. A manifest asking for a
+    # higher version is silently skipped by the app, so reject it here
+    # instead of letting the plugin load nowhere.
+    api_version = m.get("api_version", 1)
+    assert api_version == 1, (
+        f"unsupported api_version {api_version!r}; this build supports 1 only"
+    )
     for h in m.get("hooks", []):
         if h not in HOOKS:
             print(f"warning: unknown hook {h} (will be ignored on Desktop)")

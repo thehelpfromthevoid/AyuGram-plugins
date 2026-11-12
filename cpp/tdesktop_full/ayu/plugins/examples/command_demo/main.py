@@ -1,6 +1,6 @@
 """Ping-pong template: @command reception.
 
-Type `/ping hello` in any chat — the message is replaced before send.
+Type `/ping hello` in any chat - the message is replaced before send.
 Copy this folder, change the id in plugin.json, write your own commands.
 """
 try:

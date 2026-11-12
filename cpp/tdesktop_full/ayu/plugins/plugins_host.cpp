@@ -4,6 +4,8 @@
 // but be respectful and credit the original author.
 //
 // Copyright @Radolyn, 2026
+//
+// AyuGram plugin host for Desktop, (c) @CE0fbi
 #include "ayu/plugins/plugins_host.h"
 
 #include "ayu/plugins/event_bus.h"
@@ -27,7 +29,18 @@ void Host::init() {
 }
 
 void Host::ensureStarted() {
-	if (!_inited || _started) return;
+	if (!_inited || _started) {
+		return;
+	}
+	// Только с главного потока. Старт поднимает интерпретатор и грузит
+	// плагины, а разбор входящих идёт из рабочего потока: тот ждал главный,
+	// а главный ждал интерпретатор - и вставали оба. Из рабочего потока
+	// сообщения теперь просто ждут, пока хост поднимется.
+	if (QCoreApplication::instance()
+		&& (QThread::currentThread()
+			!= QCoreApplication::instance()->thread())) {
+		return;
+	}
 	_started = true;
 	_pythonAvailable = PythonHost::instance().init();
 	Manager::instance().setPythonAvailable(_pythonAvailable);
@@ -68,6 +81,18 @@ void Host::emitChatOpened(const PluginChat &chat) {
 	ensureStarted();
 	if (!_started) return;
 	EventBus::instance().emitChatOpened(chat);
+}
+
+void Host::emitTyping(const PluginTyping &typing) {
+	ensureStarted();
+	if (!_started) return;
+	EventBus::instance().emitTyping(typing);
+}
+
+bool Host::emitMediaSending(MessageSendingContext &ctx) {
+	ensureStarted();
+	if (!_started) return true;
+	return EventBus::instance().emitMediaSending(ctx);
 }
 
 void Host::emitAppStart() {

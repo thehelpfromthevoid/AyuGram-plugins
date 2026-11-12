@@ -1030,6 +1030,12 @@ void AyuSettings::setTranslationProvider(TranslationProvider val) {
 	save();
 }
 
+void AyuSettings::setOutgoingTranslateCommands(bool val) {
+	if (_outgoingTranslateCommands.current() == val) return;
+	_outgoingTranslateCommands = val;
+	save();
+}
+
 void AyuSettings::setAdaptiveCoverColor(bool val) {
 	if (_adaptiveCoverColor.current() == val) return;
 	_adaptiveCoverColor = val;
@@ -1159,6 +1165,7 @@ void to_json(nlohmann::json &j, const AyuSettings &s) {
 		{"voiceConfirmation", s._voiceConfirmation.current()},
 		{"roundConfirmation", s._roundConfirmation.current()},
 		{"translationProvider", s._translationProvider.current()},
+		{"outgoingTranslateCommands", s._outgoingTranslateCommands.current()},
 		{"adaptiveCoverColor", s._adaptiveCoverColor.current()},
 		{"improveLinkPreviews", s._improveLinkPreviews.current()},
 		{"crashReporting", s._crashReporting.current()},
@@ -1263,6 +1270,7 @@ void from_json(const nlohmann::json &j, AyuSettings &s) {
 	s._voiceConfirmation = j.value("voiceConfirmation", defaults._voiceConfirmation.current());
 	s._roundConfirmation = j.value("roundConfirmation", defaults._roundConfirmation.current());
 	s._translationProvider = j.value("translationProvider", defaults._translationProvider.current());
+	s._outgoingTranslateCommands = j.value("outgoingTranslateCommands", defaults._outgoingTranslateCommands.current());
 	s._adaptiveCoverColor = j.value("adaptiveCoverColor", defaults._adaptiveCoverColor.current());
 	s._improveLinkPreviews = j.value("improveLinkPreviews", defaults._improveLinkPreviews.current());
 	s._crashReporting = j.value("crashReporting", defaults._crashReporting.current());

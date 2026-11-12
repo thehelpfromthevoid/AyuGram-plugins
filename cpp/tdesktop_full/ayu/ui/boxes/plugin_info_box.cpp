@@ -7,6 +7,8 @@
 #include "ayu/ui/boxes/plugin_info_box.h"
 
 #include "apiwrap.h"
+#include "ayu/plugins/plugins_manager.h"
+#include "ayu/ui/boxes/plugin_settings_box.h"
 #include "core/file_utilities.h"
 #include "core/ui_integration.h"
 #include "data/data_document.h"
@@ -18,12 +20,14 @@
 #include "chat_helpers/stickers_lottie.h"
 #include "history/view/media/history_view_sticker_player.h"
 #include "main/main_session.h"
+#include "platform/platform_file_utilities.h"
 #include "styles/style_ayu_styles.h"
 #include "styles/style_boxes.h"
 #include "styles/style_chat.h"
 #include "styles/style_giveaway.h"
 #include "styles/style_layers.h"
 #include "styles/style_premium.h"
+#include "ui/boxes/confirm_box.h"
 #include "ui/painter.h"
 #include "ui/rect.h"
 #include "ui/vertical_list.h"
@@ -33,8 +37,10 @@
 #include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/scroll_area.h"
+#include "ui/toast/toast.h"
 #include "window/window_session_controller.h"
 
+#include <QFileInfo>
 #include <QPainterPath>
 #include <QRegularExpression>
 
@@ -409,12 +415,94 @@ void FillPluginInfoBox(
 
 	Ui::AddSkip(box->verticalLayout());
 
-	box->verticalLayout()->add(
+	const auto installRow = box->verticalLayout()->add(
 		object_ptr<Ui::FlatLabel>(
 			box->verticalLayout(),
-			tr::ayu_PluginsNotAvailable(),
+			rpl::single(QString()),
 			st::boxDividerLabel),
 		st::boxRowPadding);
+	const auto pathExists = QFileInfo(pluginPath).exists();
+	auto alreadyInstalled = false;
+	for (const auto &plugin : Ayu::Plugins::Manager::instance().list()) {
+		if (plugin.manifest.id == metadata.id) {
+			alreadyInstalled = true;
+			break;
+		}
+	}
+	if (alreadyInstalled) {
+		installRow->setText(tr::ayu_PluginsAlreadyInstalled(tr::now));
+		box->addButton(tr::ayu_PluginsRemove(), [=] {
+			controller->show(Ui::MakeConfirmBox({
+				.text = tr::ayu_PluginsRemoveConfirm(
+					tr::now,
+					lt_item,
+					tr::rich(metadata.name),
+					tr::rich),
+				.confirmed = [=](Fn<void()> &&close) {
+					auto error = QString();
+					if (!Ayu::Plugins::Manager::instance().remove(
+							metadata.id,
+							&error)) {
+						Ui::Toast::Show(
+							error.isEmpty()
+								? tr::ayu_PluginsInstallFailed(tr::now)
+								: error);
+						close();
+						return;
+					}
+					Ui::Toast::Show(tr::ayu_PluginsRemoved(tr::now));
+					close();
+					box->closeBox();
+				},
+				.confirmText = tr::lng_box_remove(),
+				.confirmStyle = &st::attentionBoxButton,
+			}));
+		});
+	} else if (pathExists) {
+		installRow->setText(tr::ayu_PluginsInstallHint(tr::now));
+		box->addButton(tr::ayu_PluginsInstall(), [=] {
+			auto error = QString();
+			if (!Ayu::Plugins::Manager::instance().installPath(
+					pluginPath,
+					&error)) {
+				Ui::Toast::Show(
+					error.isEmpty()
+						? tr::ayu_PluginsInstallFailed(tr::now)
+						: error);
+				return;
+			}
+			Ui::Toast::Show(tr::ayu_PluginsInstalled(tr::now));
+			box->closeBox();
+		});
+	} else {
+		installRow->setText(tr::ayu_PluginsNotAvailable(tr::now));
+	}
+
+	if (!metadata.id.isEmpty()) {
+		auto *manager = &Ayu::Plugins::Manager::instance();
+		// Settings live in one plain JSON file per plugin, the same file
+		// the plugin and the CLI read. The dialog edits the rows the plugin
+		// declared through create_settings(); for a plugin that declared none
+		// it says so and still offers the file.
+		const auto settingsPath = manager->pluginSettingsPath(metadata.id);
+		QDir().mkpath(QFileInfo(settingsPath).absolutePath());
+		auto settingsFile = QFile(settingsPath);
+		if (!settingsFile.exists()
+			&& settingsFile.open(QIODevice::WriteOnly)) {
+			settingsFile.write("{\"id\": \"" + metadata.id.toUtf8()
+				+ "\", \"version\": 1, \"settings\": {}}");
+			settingsFile.close();
+		}
+		box->addButton(tr::ayu_PluginsSettings(), [=] {
+			box->closeBox();
+			Ayu::Plugins::SettingsBox::ShowPluginSettingsBox(
+				controller,
+				metadata.id);
+		});
+		box->addButton(tr::ayu_PluginsLog(), [=] {
+			Platform::File::UnsafeLaunch(manager->pluginLogPath(metadata.id));
+		});
+	}
 
 	Ui::AddSkip(box->verticalLayout());
 

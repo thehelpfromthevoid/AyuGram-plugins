@@ -4,10 +4,11 @@ Stubbed roots (org.*, com.*, androidx.*, ui, dalvik, kotlin*, okhttp3,
 javax.*): every attribute is a no-op stub object (callable, chainable,
 falsy), so import-time code survives without a Java runtime.
 
-`java` / `android` are NOT stubbed: their real packages raise a clear
-Android-only ImportError by design, which the C++ bridge maps to a
-friendly refusal (see LoadPlugin). Guard them with try/except ImportError
-and provide a desktop fallback.
+`java` and `android` are stubbed too, but with hand-written packages
+instead of generic stubs: `jclass`, `ArrayList`, `HashMap`, `String`,
+`View`, `Handler`, `SystemClock`, `Environment` and friends return real
+Python values, so a mobile plugin's non-UI logic runs on Desktop. Only
+code that genuinely needs a JVM stays inert.
 
 Real files on sys.path (e.g. a plugin shipping its own `ui/` helper
 package) always win over stubs.
@@ -68,6 +69,15 @@ def stub(name: str = "Stub") -> _StubObject:
 
 
 class _StubModule(types.ModuleType):
+	# Tolerates being constructed with extra arguments. The import machinery
+	# rebuilds a submodule's module object with (name, spec, locations) once it
+	# discovers the parent is a package, and a plain ModuleType signature
+	# rejects that with "module() takes at most 2 arguments (3 given)" - which
+	# surfaced as `android.widget.TextView` failing to import while
+	# `android.graphics.drawable` worked.
+	def __init__(self, name, *args, **kwargs):
+		super().__init__(name)
+
 	def __getattr__(self, name: str):
 		if name.startswith("__") and name.endswith("__"):
 			raise AttributeError(name)

@@ -8,6 +8,12 @@
 
 #include "ayu/plugins/plugin_manifest.h"
 
+#include <QJsonObject>
+#include <QMap>
+#include <QString>
+#include <QVariant>
+#include <QVector>
+
 class QString;
 
 namespace Ayu::Plugins {
@@ -24,6 +30,7 @@ public:
 	void unloadPlugin(const QString &id);
 
 	void logError(const QString &pluginId, const QString &msg);
+
 
 private:
 	PythonHost() = default;

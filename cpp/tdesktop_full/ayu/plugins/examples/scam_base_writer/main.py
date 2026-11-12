@@ -34,7 +34,7 @@ class ScamBaseWriterPlugin(BasePlugin):
             return HookResult()
         for pat in _PATTERNS:
             if pat.search(text):
-                self.toast("Scam pattern detected — check the message before sending")
+                self.toast("Scam pattern detected - check the message before sending")
                 self.log(f"scam pattern matched: {pat.pattern}")
                 break
         return HookResult()

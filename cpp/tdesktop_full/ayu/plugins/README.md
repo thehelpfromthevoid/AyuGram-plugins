@@ -4,18 +4,18 @@ Cross-platform Python plugin system (Windows / Linux / macOS).
 
 ## Layout
 
-- `plugin_manifest.*` — `plugin.json` + legacy `__id__/__name__` support
-- `event_bus.*` — in-process fan-out, no Python dependency
-- `plugins_manager.*` — scan / enable / disable / install
-- `plugins_host.*` — facade, lifetime bound to app
-- `python_host.*` — stub when `DESKTOP_APP_WITH_PLUGINS=OFF`, real bridge when ON
-- `bridge/ayu_api.cpp` — `pybind11` embedded module `ayu_api`
-- `sandbox/` — `audithook.py`, `import_filter.py`
-- `shim/ayugram_compat/` — mobile exteraGram compat
-- `ui/plugins_section.*` — native Settings → AyuGram → Plugins (no separate tab/host UI)
-- `hook_points.*` — 3-line adapters for core
+- `plugin_manifest.*` - `plugin.json` + legacy `__id__/__name__` support
+- `event_bus.*` - in-process fan-out, no Python dependency
+- `plugins_manager.*` - scan / enable / disable / install
+- `plugins_host.*` - facade, lifetime bound to app
+- `python_host.*` - stub when `DESKTOP_APP_WITH_PLUGINS=OFF`, real bridge when ON
+- `bridge/ayu_api.cpp` - `pybind11` embedded module `ayu_api`
+- `sandbox/` - `audithook.py`, `import_filter.py`
+- `shim/ayugram_compat/` - mobile exteraGram compat
+- `ui/plugins_section.*` - native Settings → AyuGram → Plugins (no separate tab/host UI)
+- `hook_points.*` - 3-line adapters for core
 
-The standalone Tk `plugins/standalone/` host is a **developer simulator only** — not the product UI. Users manage plugins inside AyuGram Settings.
+The standalone Tk `plugins/standalone/` host is a **developer simulator only** - not the product UI. Users manage plugins inside AyuGram Settings.
 
 ## Build
 
@@ -81,9 +81,9 @@ when present and the destination is missing.
 
 Settings → AyuGram → Plugins:
 
-- **Install Plugin…** — `.plugin` / `.py` / `.zip` / `.ayupack` / `plugin.json`
-- **Install from Folder…** — folder with `plugin.json` + entry
-- **Plugin format** — help + **Copy JSON example** (`ExampleManifestJson()`)
+- **Install Plugin…** - `.plugin` / `.py` / `.zip` / `.ayupack` / `plugin.json`
+- **Install from Folder…** - folder with `plugin.json` + entry
+- **Plugin format** - help + **Copy JSON example** (`ExampleManifestJson()`)
 
 `Manager::installPath` routes to `installFromDir` / `installFromZip` /
 `installFromPluginFile`.

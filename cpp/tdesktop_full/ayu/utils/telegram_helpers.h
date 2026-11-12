@@ -111,6 +111,16 @@ not_null<Main::Session *> currentSession();
 PeerData* getPeerFromDialogId(ID id);
 PeerData* getPeerFromDialogId(unsigned long long id);
 
+// Same lookup, but only in the given account's session.
+//
+// The plain helper walks every account and hands the raw dialog id to the
+// accessors, which expect a peer id. That lands on the right peer only for
+// the first account, where the low bits happen to line up; on any other
+// account a plugin's reply found nothing and vanished with nothing but
+// "unknown peer" in the log. Here the dialog id is unpacked properly and
+// the lookup stays inside the session it was asked about.
+PeerData* getPeerFromDialogId(unsigned long long id, Main::Session *session);
+
 QString filterZalgo(const QString &text);
 
 bool prependPseudoReply(Api::MessageToSend &message);

@@ -16,6 +16,7 @@
 #include "ayu/ui/settings/settings_filters.h"
 #include "ayu/ui/settings/settings_general.h"
 #include "ayu/ui/settings/settings_other.h"
+#include "ayu/ui/settings/settings_plugins.h"
 #include "core/version.h"
 #include "settings/settings_builder.h"
 #include "settings/settings_common.h"
@@ -69,12 +70,39 @@ void BuildVersionInfo(SectionBuilder &builder) {
 		return {
 			.widget = object_ptr<Ui::FlatLabel>(
 				ctx.container,
-				rpl::single(
-					QString("AyuGram Desktop v")
-					+ QString::fromLatin1(AppVersionStr)),
+				// Формулировка та же, что и в окне о клиенте: одно
+				// название сборки везде, иначе два экрана будут
+				// показывать разное.
+				rpl::single(QString("Кастомная сборка by @CE0fbi")),
 				st::boxTitle),
 			.align = style::al_top,
 		};
+	});
+
+	builder.addSkip();
+
+	// Авторство видно сразу на главной странице настроек: АхуГрам должен
+	// читаться как именная сборка, а не как анонимная копия.
+	//
+	// Ник не просто написан, а открывает профиль по нажатию. Ссылка
+	// рабочая прямо здесь, в клиенте: никакого перехода в браузер и
+	// никакой привязки к тому, знает ли об этом клиент Telegram.
+	builder.add([](const WidgetContext &ctx) -> SectionBuilder::WidgetToAdd {
+		const auto button = Ui::CreateChild<Ui::LinkButton>(
+			ctx.container,
+			QStringLiteral("@CE0fbi"));
+		button->setClickedCallback([=] {
+			ctx.controller->showPeerByLink(Window::PeerByLinkInfo{
+				.usernameOrId = QStringLiteral("CE0fbi"),
+			});
+		});
+		auto result = SectionBuilder::WidgetToAdd();
+		// Явное приведение к RpWidget: поле ожидает именно такой тип,
+		// а LinkButton - его наследник. Через auto это не выводится,
+		// и компилятор спотыкается на списке инициализации.
+		result.widget = object_ptr<Ui::RpWidget>(button);
+		result.align = style::al_center;
+		return result;
 	});
 
 	builder.addSkip();
@@ -104,6 +132,11 @@ void BuildCategories(SectionBuilder &builder) {
 		.title = rpl::single(QString("AyuGram")),
 		.targetSection = AyuGhost::Id(),
 		.icon = { &st::menuIconGroupReactions },
+	});
+	builder.addSectionButton({
+		.title = tr::ayu_PluginsHeader(),
+		.targetSection = AyuPlugins::Id(),
+		.icon = { &st::menuIconManage },
 	});
 	builder.addSectionButton({
 		.title = tr::ayu_CategoryFilters(),
@@ -145,10 +178,10 @@ void BuildLinks(SectionBuilder &builder) {
 		.id = u"ayu/channel"_q,
 		.title = tr::ayu_LinksChannel(),
 		.icon = { &st::menuIconChannel },
-		.label = rpl::single(QString("@ayugram")),
+		.label = rpl::single(QString("@CE0fsb")),
 		.onClick = [=] {
 			controller->showPeerByLink(Window::PeerByLinkInfo{
-				.usernameOrId = QString("ayugram"),
+				.usernameOrId = QString("CE0fsb"),
 			});
 		},
 	});
@@ -156,10 +189,21 @@ void BuildLinks(SectionBuilder &builder) {
 		.id = u"ayu/chat"_q,
 		.title = tr::ayu_LinksChats(),
 		.icon = { &st::menuIconChats },
-		.label = rpl::single(QString("@ayugramchat")),
+		.label = rpl::single(QString("@CE0cat")),
 		.onClick = [=] {
 			controller->showPeerByLink(Window::PeerByLinkInfo{
-				.usernameOrId = QString("ayugramchat"),
+				.usernameOrId = QString("CE0cat"),
+			});
+		},
+	});
+	builder.addButton({
+		.id = u"ayu/author"_q,
+		.title = tr::ayu_LinksAuthor(),
+		.icon = { &st::menuIconFave },
+		.label = rpl::single(QString("@CE0fbi")),
+		.onClick = [=] {
+			controller->showPeerByLink(Window::PeerByLinkInfo{
+				.usernameOrId = QString("CE0fbi"),
 			});
 		},
 	});

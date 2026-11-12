@@ -13,6 +13,17 @@ _SAFE = {
     "re", "json", "datetime", "time", "math", "typing", "collections",
     "functools", "itertools", "enum", "dataclasses", "pathlib", "threading",
     "queue", "weakref", "copy", "traceback", "hashlib", "base64", "urllib",
+    "pickle", "marshal", "shutil", "importlib", "zipfile", "tarfile",
+    "tempfile", "glob", "fnmatch", "inspect", "types", "warnings",
+    "contextlib", "functools", "operator", "itertools", "collections",
+    "dataclasses", "enum", "typing", "abc", "io", "os", "sys",
+    # ast is how the bridge reads a plugin's own code to work out which
+    # permissions it needs, so a plugin with no manifest still loads. It only
+    # parses source; it grants no capability of its own.
+    "ast",
+    # Same reason: the bridge calls this to fill in a manifest that declares
+    # nothing, which is the normal state of a plugin written for a phone.
+    "permissions_infer",
 }
 _NEED_PERM = {
     "socket": "net.http",
