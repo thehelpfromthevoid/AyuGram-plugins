@@ -1,30 +1,87 @@
 """Scan / load / enable AyuGram plugins for the standalone host.
 
 Accepted layouts (mirrors the C++ Manager, plus mobile conveniences):
-  folder with plugin.json | manifest.json
+  folder with plugin.json | manifest.json | manifest.yaml | manifest.yml |
+      manifest.toml | info.json
   folder with an entry script: main.py | __init__.py | plugin.py |
-      index.py | bot.py | single *.plugin file | single *.py file
+      index.py | bot.py | handler.py | entry.py | app.py | run.py |
+      script.py | mod.py | __main__.py | single *.plugin file | single *.py
   single file: *.plugin | *.py | *.pyw  (metadata from __id__/__name__
       or filename fallback)
-  archive: *.zip | *.ayupack | *.ayu | *.tgx (root found recursively)
+  archive: *.zip | *.ayupack | *.ayu | *.tgx | *.tar | *.tar.gz | *.tgz |
+      *.tar.bz2 | *.tbz2 | *.tar.xz | *.txz | *.tar.zst | *.7z | *.rar
+
+AyuGram plugin host for Desktop, (c) @CE0fbi
 """
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import shutil
 import sys
+import tarfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 ID_RE_OK = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{1,63}$")
-MANIFEST_NAMES = ("plugin.json", "manifest.json", "manifest.yaml", "manifest.yml", "manifest.toml")
-ENTRY_CANDIDATES = ("main.py", "__init__.py", "plugin.py", "index.py", "bot.py")
-ARCHIVE_SUFFIXES = (".zip", ".ayupack", ".ayu", ".tgx")
+MANIFEST_NAMES = (
+	"plugin.json",
+	"manifest.json",
+	"manifest.yaml",
+	"manifest.yml",
+	"manifest.toml",
+	"info.json",
+	"ayug.json",
+	"plugin.yaml",
+	"plugin.yml",
+)
+ENTRY_CANDIDATES = (
+	"main.py",
+	"__init__.py",
+	"plugin.py",
+	"index.py",
+	"bot.py",
+	"handler.py",
+	"handlers.py",
+	"entry.py",
+	"app.py",
+	"run.py",
+	"script.py",
+	"mod.py",
+	"module.py",
+	"__main__.py",
+	"loader.py",
+	"start.py",
+	"init.py",
+)
+ARCHIVE_SUFFIXES = (
+	".zip",
+	".ayupack",
+	".ayu",
+	".tgx",
+	".tar",
+	".tar.gz",
+	".tgz",
+	".tar.bz2",
+	".tbz2",
+	".tar.xz",
+	".txz",
+	".tar.zst",
+	".tzst",
+	".7z",
+	".rar",
+)
 SINGLE_SUFFIXES = (".plugin", ".py", ".pyw")
 _META_KEYS = ("id", "name", "description", "author", "version")
+
+
+def _is_archive_name(name: str) -> bool:
+    """Suffix match that also understands multi-part names like `.tar.gz`."""
+    low = str(name or "").lower()
+    return any(low.endswith(sfx) for sfx in ARCHIVE_SUFFIXES)
 
 
 def sanitize_id(raw: str, fallback: str = "plugin") -> str:
@@ -102,12 +159,56 @@ class PluginLoader:
         self._enabled: dict[str, bool] = {}
         self._namespaces: dict[str, dict] = {}
         self.plugins_root.mkdir(parents=True, exist_ok=True)
+        self._watch_for_stalls()
+
+    def _watch_for_stalls(self) -> None:
+        """Keep a record of a stuck main thread.
+
+        The watchdog outside the process can only see that the window stopped
+        answering, and killing it throws away the stacks that would say why.
+        This has run several times for no visible reason, so the evidence is
+        collected from inside, where it survives the kill.
+        """
+        self._enable_crash_dump()
+        try:
+            from ayugram_compat import stall_watch
+            stall_watch.start()
+        except Exception:
+            pass
+
+    def _enable_crash_dump(self) -> None:
+        """Write every thread's stack on a timer, whatever state the app is in.
+
+        faulthandler is used rather than Python code because the freeze this is
+        here to explain happens with the interpreter lock held: a thread that
+        needs that lock to run cannot notice anything, and the log was written
+        empty. faulthandler works below the interpreter, so it still reports
+        while the lock is stuck.
+        """
+        try:
+            import faulthandler
+        except Exception:
+            return
+        try:
+            folder = self.plugins_root.parent
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / "python_crash.log"
+            handle = target.open("a", encoding="utf-8", errors="replace")
+        except Exception:
+            return
+        try:
+            # Repeated, so a freeze that outlives one dump still leaves a trail
+            # with timestamps rather than a single stale snapshot.
+            faulthandler.enable(handle=handle, all_threads=True)
+            faulthandler.dump_traceback_later(30, repeat=True, file=handle)
+        except Exception:
+            pass
 
     def load_state(self) -> None:
         if not self.state_path.exists():
             return
         try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            data = json.loads(self.state_path.read_text(encoding="utf-8-sig"))
             if isinstance(data, dict):
                 self._enabled = {str(k): bool(v) for k, v in data.items()}
         except Exception:
@@ -125,7 +226,7 @@ class PluginLoader:
     @staticmethod
     def _read_manifest_file(manifest: Path):
         try:
-            text = manifest.read_text(encoding="utf-8")
+            text = manifest.read_text(encoding="utf-8-sig")
         except Exception:
             return None
         suffix = manifest.suffix.lower()
@@ -212,7 +313,7 @@ class PluginLoader:
             if entry is None:
                 raise ValueError("no plugin.json/manifest.json nor entry script (*.py/*.plugin)")
             try:
-                text = entry.read_text(encoding="utf-8", errors="ignore")
+                text = entry.read_text(encoding="utf-8-sig", errors="ignore")
             except Exception:
                 text = ""
             fields = read_legacy_metadata(text)
@@ -309,8 +410,8 @@ class PluginLoader:
             pass
 
     def _restore_settings(self, info: PluginInfo) -> None:
-        # Simulator-side persistence: <plugins_root>/<id>.settings.json.
-        # The C++ app does not read this file (memory-only settings there).
+        # Persistent settings: <plugins_root>/<id>.settings.json, the same file
+        # the shim's settings_store writes, so the CLI and the app agree.
         try:
             glb = self._namespaces.get(info.id)
             inst = glb.get("_ayu_plugin_instance") if isinstance(glb, dict) else None
@@ -319,9 +420,11 @@ class PluginLoader:
             fp = self.plugins_root / f"{info.id}.settings.json"
             if not fp.is_file():
                 return
-            data = json.loads(fp.read_text(encoding="utf-8"))
+            data = json.loads(fp.read_text(encoding="utf-8-sig"))
             if isinstance(data, dict):
-                inst.import_settings(data)
+                values = data.get("settings", data)
+                if isinstance(values, dict):
+                    inst.import_settings(values)
         except Exception:
             pass
 
@@ -366,6 +469,10 @@ class PluginLoader:
             _install()
         except Exception:
             pass
+        # Ensure shim is on sys.path so `from base_plugin import ...` works
+        shim_dir = str(Path(__file__).resolve().parent.parent / "shim")
+        if shim_dir not in sys.path:
+            sys.path.insert(0, shim_dir)
 
     def load_plugin_code(self, info: PluginInfo) -> None:
         if not info.dir_path or info.error:
@@ -374,12 +481,11 @@ class PluginLoader:
         entry = info.dir_path / info.entry
         self._ensure_libs(info)
         self._install_sandbox(info)
-        self._restore_settings(info)
         # Ensure plugin dir is importable for local modules.
         plugin_dir = str(info.dir_path.resolve())
         if plugin_dir not in sys.path:
             sys.path.insert(0, plugin_dir)
-        code = entry.read_text(encoding="utf-8")
+        code = entry.read_text(encoding="utf-8-sig")
         glb = {
             "__name__": info.id,
             "__file__": str(entry),
@@ -420,6 +526,7 @@ class PluginLoader:
                     pass
         except Exception:
             pass
+        self._restore_settings(info)
         info.loaded = True
         info.error = ""
 
@@ -540,7 +647,7 @@ class PluginLoader:
         manifests: list[Path] = []
         entries: list[Path] = []
         singles: list[Path] = []
-        for root, dirs, files in os_walk(tmp):
+        for root, dirs, files in os.walk(tmp):
             depth = len(Path(root).relative_to(tmp).parts)
             if depth > 4:
                 dirs[:] = []
@@ -566,6 +673,42 @@ class PluginLoader:
             return singles[0].parent
         return None
 
+    def _extract_archive(self, archive: Path, tmp: Path) -> None:
+        name = archive.name.lower()
+        if archive.suffix.lower() == ".zip" or name.endswith((".ayupack", ".ayu", ".tgx")):
+            with zipfile.ZipFile(archive, "r") as z:
+                for member in z.infolist():
+                    rel = member.filename.replace("\\", "/")
+                    if ".." in rel or rel.startswith("/"):
+                        raise ValueError(f"unsafe zip entry: {rel}")
+                    dest = (tmp / rel).resolve()
+                    if not str(dest).startswith(str(tmp.resolve())):
+                        raise ValueError(f"unsafe zip entry: {rel}")
+                    z.extract(member, tmp)
+            return
+        if archive.suffix.lower() == ".tar" or name.endswith((
+            ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
+            ".tar.zst", ".tzst",
+        )):
+            with tarfile.open(archive, "r:*") as t:
+                for member in t.getmembers():
+                    rel = member.name.replace("\\", "/")
+                    if ".." in rel or rel.startswith("/"):
+                        raise ValueError(f"unsafe tar entry: {rel}")
+                    if member.issym() or member.islnk():
+                        continue
+                    dest = (tmp / rel).resolve()
+                    if not str(dest).startswith(str(tmp.resolve())):
+                        raise ValueError(f"unsafe tar entry: {rel}")
+                    t.extract(member, tmp)
+            return
+        if archive.suffix.lower() in (".rar", ".7z"):
+            raise ValueError(
+                f"{archive.suffix} archives are not supported: extract it first "
+                "or repack as .zip / .tar"
+            )
+        raise ValueError(f"unsupported archive: {archive.name}")
+
     def install_from_zip(self, zip_path: Path) -> PluginInfo:
         zip_path = Path(zip_path)
         tmp = self.plugins_root / f".tmp_{zip_path.stem}"
@@ -573,12 +716,7 @@ class PluginLoader:
             shutil.rmtree(tmp)
         tmp.mkdir(parents=True)
         try:
-            with zipfile.ZipFile(zip_path, "r") as z:
-                for member in z.infolist():
-                    name = member.filename.replace("\\", "/")
-                    if ".." in name or name.startswith("/"):
-                        raise ValueError(f"unsafe zip entry: {name}")
-                    z.extract(member, tmp)
+            self._extract_archive(zip_path, tmp)
             root = self._find_root(tmp)
             if root is None:
                 # Flat single-file archive: adopt the lone script.
@@ -608,14 +746,17 @@ class PluginLoader:
             if root.is_file():
                 return self.install_from_file(root)
             return self.install_from_dir(root)
-        if path.name.lower() == "plugin.json":
+        if path.name.lower() in MANIFEST_NAMES:
             return self.install_from_dir(path.parent)
-        if path.suffix.lower() in ARCHIVE_SUFFIXES:
+        if _is_archive_name(path.name):
             return self.install_from_zip(path)
         if path.suffix.lower() in SINGLE_SUFFIXES:
             return self.install_from_file(path)
         raise ValueError(
-            "unsupported plugin package (use folder, .zip, .ayupack, .ayu, .tgx, .plugin, .py, .pyw)")
+            "unsupported plugin package (use a folder, or one of: "
+            + ", ".join(ARCHIVE_SUFFIXES + SINGLE_SUFFIXES)
+            + ")"
+        )
 
 
 def os_walk(top: Path):

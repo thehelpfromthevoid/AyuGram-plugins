@@ -24,6 +24,8 @@ public:
 	bool emitMessageSending(MessageSendingContext &ctx);
 	void emitDeleted(const MessageDeletedContext &ctx);
 	void emitChatOpened(const PluginChat &chat);
+	void emitTyping(const PluginTyping &typing);
+	bool emitMediaSending(MessageSendingContext &ctx);
 	void emitAppStart();
 	void emitAppStop();
 

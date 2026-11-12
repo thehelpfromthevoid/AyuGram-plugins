@@ -8,7 +8,7 @@ All new code compiles WITHOUT Python. To enable full bridge:
 option(DESKTOP_APP_WITH_PLUGINS "AyuGram python plugins" OFF)
 ```
 
-## 2. `Telegram/CMakeLists.txt` — append to `ayugram_files` (after line ~248):
+## 2. `Telegram/CMakeLists.txt` - append to `ayugram_files` (after line ~248):
 
 ```
 ayu/plugins/plugin_manifest.cpp

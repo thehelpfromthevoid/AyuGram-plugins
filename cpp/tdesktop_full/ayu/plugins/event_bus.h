@@ -19,6 +19,8 @@ using MessageCallback = std::function<void(const PluginMessage &)>;
 using MessageSendingCallback = std::function<void(MessageSendingContext &)>;
 using MessageDeletedCallback = std::function<void(const MessageDeletedContext &)>;
 using ChatOpenedCallback = std::function<void(const PluginChat &)>;
+using TypingCallback = std::function<void(const PluginTyping &)>;
+using MediaSendingCallback = std::function<void(MessageSendingContext &)>;
 using SimpleCallback = std::function<void()>;
 using SettingChangedCallback = std::function<void(const QString &, const QString &)>;
 
@@ -33,6 +35,8 @@ public:
 	int subscribeAppStart(SimpleCallback cb);
 	int subscribeAppStop(SimpleCallback cb);
 	int subscribeSettingChanged(SettingChangedCallback cb);
+	int subscribeTyping(TypingCallback cb);
+	int subscribeMediaSending(MediaSendingCallback cb);
 	void unsubscribe(int token);
 
 	void emitMessage(const PluginMessage &msg);
@@ -42,12 +46,17 @@ public:
 	void emitAppStart();
 	void emitAppStop();
 	void emitSettingChanged(const QString &key, const QString &value);
+	void emitTyping(const PluginTyping &typing);
+	bool emitMediaSending(MessageSendingContext &ctx);
 
 	void clear();
 
+	// Total live subscriptions, so a plugin can confirm the app wired it up.
+	int subscriberCount() const;
+
 private:
 	EventBus() = default;
-	std::mutex _mutex;
+	mutable std::mutex _mutex;
 	int _nextToken = 1;
 	std::map<int, MessageCallback> _onMessage;
 	std::map<int, MessageSendingCallback> _onSending;
@@ -56,6 +65,8 @@ private:
 	std::map<int, SimpleCallback> _onStart;
 	std::map<int, SimpleCallback> _onStop;
 	std::map<int, SettingChangedCallback> _onSetting;
+	std::map<int, TypingCallback> _onTyping;
+	std::map<int, MediaSendingCallback> _onMedia;
 };
 
 } // namespace Ayu::Plugins

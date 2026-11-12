@@ -44,3 +44,26 @@ from ayugram_compat.client_utils import (  # noqa: F401
 	send_video,
 	set_selected_account,
 )
+
+
+def __getattr__(name):
+	"""Answer for a helper Desktop does not have, instead of failing the import.
+
+	`from client_utils import _generate_photo_sizes` is how a plugin reaches a
+	helper it expects a phone to provide. Raising AttributeError here kills the
+	whole plugin at import over one function, and the only clue in the log is
+	an ImportError naming that function - which reads as a broken AyuGram
+	rather than as a missing capability.
+
+	So an unknown helper comes back as something callable that does nothing,
+	and the name is recorded so the plugin check can list it.
+	"""
+	if name.startswith("__"):
+		raise AttributeError(name)
+	from ayugram_compat.gaps import note_gap
+	from org._stubs import Placeholder
+
+	note_gap(f"client_utils.{name}")
+	stub = Placeholder(f"client_utils.{name}")
+	stub.__ayu_stub__ = True
+	return stub

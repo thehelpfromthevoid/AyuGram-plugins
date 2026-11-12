@@ -1264,6 +1264,39 @@ PeerData *getPeerFromDialogId(unsigned long long id) {
 	return getPeerFromDialogId<unsigned long long>(id);
 }
 
+PeerData *getPeerFromDialogId(
+		unsigned long long id,
+		Main::Session *session) {
+	if (!session || !id) {
+		return nullptr;
+	}
+	// A dialog id is the peer id shifted left by 32 with the account slot
+	// in the low bits, so shifting it back gives the peer. The bare id and
+	// the untouched value are tried as well, because plugins are seen
+	// passing all three.
+	//
+	// The values are handed over as plain numbers rather than as PeerId:
+	// the PeerId overloads of these accessors are deleted on purpose, and
+	// passing a typed peer id here would not compile.
+	const auto signedValue = static_cast<long long>(id);
+	const auto magnitude = static_cast<unsigned long long>(
+		signedValue < 0 ? -signedValue : signedValue);
+	for (const auto candidate : { id >> 32, magnitude, id }) {
+		PeerData *from = session->data().userLoaded(candidate);
+		if (!from) {
+			from = session->data().channelLoaded(candidate);
+		}
+		if (!from) {
+			from = reinterpret_cast<PeerData*>(
+				session->data().chatLoaded(candidate));
+		}
+		if (from) {
+			return from;
+		}
+	}
+	return nullptr;
+}
+
 QString filterZalgo(const QString &text) {
 	static const auto regex = QRegularExpression(
 		kZalgoPattern,

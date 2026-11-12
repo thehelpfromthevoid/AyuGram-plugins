@@ -1,9 +1,0 @@
-{
-  "id": "smart_translate",
-  "name": "Smart Translate",
-  "description": "Переводит входящие сообщения: по языку, по слову-триггеру или всегда, с фильтрами против кода, ссылок и своих сообщений. Автор: @CE0fbi",
-  "author": "@CE0fbi",
-  "version": "1.0.0",
-  "entry": "main.py",
-  "desktop_only": true
-}

@@ -102,6 +102,9 @@ pluginShowInFolder: IconButton(defaultIconButton) {
 	ripple: defaultRippleAnimationBgOver;
 }
 maxPluginDescriptionHeight: 400px;
+// A plugin can declare twenty-odd settings. Without a cap the dialog grows past
+// the screen and the rows at the bottom, including Save, cannot be reached.
+maxPluginSettingsHeight: 720px;
 pluginVersionAuthorLabel: FlatLabel(boxLabel) {
     align: align(center);
 }

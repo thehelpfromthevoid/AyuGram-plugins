@@ -26,6 +26,8 @@ struct PluginInstance {
 	QString lastError;
 	std::vector<int> busTokens;
 	bool pythonLoaded = false;
+	// Muted by the slow-hook breaker: loaded, but its hooks are skipped.
+	bool muted = false;
 };
 
 } // namespace Ayu::Plugins

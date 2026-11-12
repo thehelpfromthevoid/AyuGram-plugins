@@ -32,8 +32,16 @@ struct PluginManifest {
 	QString icon;
 	bool trusted = false;
 	QString sourcePath;
+	// Platforms the plugin can run on. Empty means "any". A plugin that
+	// lists only android is skipped without executing its entry script,
+	// instead of raising ModuleNotFoundError on every launch.
+	QStringList platforms;
 };
 
+[[nodiscard]] bool ManifestRunsHere(const PluginManifest &m);
+// Everything that would make the app refuse or skip this plugin, in the
+// words a user can act on. Empty means the manifest is fine.
+[[nodiscard]] QStringList ManifestProblems(const PluginManifest &m);
 [[nodiscard]] bool ValidateManifest(const PluginManifest &m, QString *error = nullptr);
 [[nodiscard]] bool ManifestHasPermission(const PluginManifest &m, const QString &perm);
 [[nodiscard]] bool ParseManifestJson(const QByteArray &data, PluginManifest &out, QString *error = nullptr);

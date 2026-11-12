@@ -53,10 +53,42 @@ def get_activity(*args, **kwargs):
 
 
 def run_on_ui_thread(fn, *args, **kwargs):
-    try:
-        fn(*args, **kwargs)
-    except Exception as e:
-        log(f"run_on_ui_thread: {e}")
+	"""Hand the work to the main thread instead of running it here.
+
+	It used to call fn inline, so anything a plugin declared as UI work ran on
+	whichever plugin thread called it, holding the GIL while it touched the
+	interface from a thread that does not own it. That froze the window.
+
+	Arguments are carried across, and a marshal that raises runs the work here
+	rather than dropping it: several plugins pass a delay as a second argument
+	and it used to be discarded, and a plugin treats this as fire-and-forget, so
+	a lost call is a feature that silently never happens.
+	"""
+	callback = fn
+	if args or kwargs:
+		def callback(*_ignored):  # noqa: F811 - closure over the real call
+			return fn(*args, **kwargs)
+
+	bridge = globals().get("_ayu_bridge")
+	marshal = getattr(bridge, "run_on_main_thread", None)
+	if marshal is None:
+		# No bridge (a bare interpreter, or an older app): run inline rather
+		# than drop the call, since Android plugins treat this as
+		# fire-and-forget.
+		try:
+			callback()
+		except Exception as e:
+			log(f"run_on_ui_thread: {e}")
+		return
+	try:
+		marshal(callback)
+		return
+	except Exception as e:
+		log(f"run_on_ui_thread: {e}; running it here instead")
+	try:
+		callback()
+	except Exception as e:
+		log(f"run_on_ui_thread: {e}")
 
 
 def run_on_background_thread(fn, *args, **kwargs):
@@ -76,11 +108,31 @@ def show_dialog(*args, **kwargs):
 
 
 def copy_to_clipboard(text):
+    """Put text on the clipboard, saying whether it worked.
+
+    It used to show a toast with the text and copy nothing at all, and a plugin
+    that uses this to hand a price or a link to the user went on to report
+    success - and to tell them it had been copied. A function whose name is an
+    action must not be a no-op that returns as though it were one.
+    """
+    body = str(text or "")
+    if not body:
+        return False
     try:
-        from ayu_api import toast as _t
-        _t(f"[clipboard] {str(text)[:120]}")
+        from ayu_api import copy_to_clipboard as _copy
+        return bool(_copy(body))
+    except ImportError:
+        pass
+    except Exception as e:
+        _log(f"copy_to_clipboard failed: {e}")
+        return False
+    try:
+        # Standalone and CLI runs have no clipboard to write to. Say so rather
+        # than reporting a copy that did not happen.
+        _log(f"clipboard is unavailable here, so {body[:80]!r} was not copied")
     except Exception:
         pass
+    return False
 
 
 class OnClickListener:

@@ -1,7 +1,7 @@
-"""Встроенный перевод исходящих: /en /ru /tr — демо-плагин.
+"""Р’СЃС‚СЂРѕРµРЅРЅС‹Р№ РїРµСЂРµРІРѕРґ РёСЃС…РѕРґСЏС‰РёС…: /en /ru /tr вЂ” РґРµРјРѕ-РїР»Р°РіРёРЅ.
 
-Нативное приложение уже умеет те же команды (Настройки → AyuGram → Общие).
-Этот плагин остаётся как пример on_message_sending; по умолчанию выключен.
+РќР°С‚РёРІРЅРѕРµ РїСЂРёР»РѕР¶РµРЅРёРµ СѓР¶Рµ СѓРјРµРµС‚ С‚Рµ Р¶Рµ РєРѕРјР°РЅРґС‹ (РќР°СЃС‚СЂРѕР№РєРё в†’ AyuGram в†’ РћР±С‰РёРµ).
+Р­С‚РѕС‚ РїР»Р°РіРёРЅ РѕСЃС‚Р°С‘С‚СЃСЏ РєР°Рє РїСЂРёРјРµСЂ on_message_sending; РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ РІС‹РєР»СЋС‡РµРЅ.
 """
 try:
 	from ayugram_compat.hook_utils import hook
@@ -21,7 +21,7 @@ def _translate(text: str, to_lang: str) -> str:
 		f"?client=gtx&sl=auto&tl={urllib.parse.quote(to_lang)}&dt=t&q={q}"
 	)
 	req = urllib.request.Request(url, headers={"User-Agent": "AyuGramDesktop/1.0"})
-	with urllib.request.urlopen(req, timeout=8) as resp:
+	with urllib.request.urlopen(req, timeout=2) as resp:
 		raw = resp.read().decode("utf-8", "replace")
 	# rough parse: [[["translated","orig",...],...],...]
 	import json
@@ -61,7 +61,7 @@ def on_sending(ctx):
 	try:
 		new = _translate(payload, to_lang)
 	except Exception as e:
-		toast(f"Перевод не удался: {e}")
+		toast(f"РџРµСЂРµРІРѕРґ РЅРµ СѓРґР°Р»СЃСЏ: {e}")
 		return
 	if isinstance(ctx, dict):
 		ctx["rewrite"] = True
@@ -73,4 +73,4 @@ def on_sending(ctx):
 			ctx.rewrittenText = new
 		if hasattr(ctx, "rewritten_text"):
 			ctx.rewritten_text = new
-	toast("Переведено (плагин)")
+	toast("РџРµСЂРµРІРµРґРµРЅРѕ (РїР»Р°РіРёРЅ)")

@@ -41,9 +41,11 @@ def _hook(event: str, args):
         path = str(args[0]) if args else ""
         if "tdata" in path.replace("\\", "/"):
             raise PermissionError("ayu sandbox: access to tdata/ denied")
-        if not _ALLOW_STORAGE and not path.startswith("/tmp/ayu-plugin"):
-            # allow read of own dir only; enforced strictly in import_filter
-            pass
+        if not _ALLOW_STORAGE:
+            mode = str(args[1]) if len(args) > 1 else "r"
+            if any(c in mode for c in "wax+"):
+                raise PermissionError(
+                    "ayu sandbox: file write denied (need storage.write permission")
     elif event in ("os.system", "os.exec", "os.spawn", "subprocess.Popen"):
         if not _ALLOW_PROCESS:
             raise PermissionError("ayu sandbox: subprocess denied (need process.spawn permission)")

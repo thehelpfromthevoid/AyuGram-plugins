@@ -48,5 +48,5 @@ a bundled `ui/` helper) take precedence over stubs.
 ## Non-portable
 
 `android.content.Intent`, `Context.getSystemService`, background services,
-`ctypes` tricks — guard with `try/except NotImplementedError` and provide
+`ctypes` tricks - guard with `try/except NotImplementedError` and provide
 desktop fallback.

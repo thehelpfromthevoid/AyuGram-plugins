@@ -1,11 +1,11 @@
-"""Macros — create/save/run text macros via chat commands.
+"""Macros - create/save/run text macros via chat commands.
 
 Commands (outgoing):
-  /macro save <name> <text>  — save macro
-  /macro del <name>          — delete macro
-  /macro list                — list macros (toast)
-  /m <name>                  — expand and send macro text
-  /macro <name>              — same as /m
+  /macro save <name> <text>  - save macro
+  /macro del <name>          - delete macro
+  /macro list                - list macros (toast)
+  /m <name>                  - expand and send macro text
+  /macro <name>              - same as /m
 """
 try:
 	from ayugram_compat.hook_utils import hook
@@ -73,7 +73,7 @@ def _set_cancel(ctx):
 
 @hook("on_message_sending")
 def on_sending(ctx):
-	msg = ctx["message"] if isinstance(ctx, dict) else ctx.message
+	msg = ctx.get("message") if isinstance(ctx, dict) else getattr(ctx, "message", None)
 	text = msg.get("text", "") if isinstance(msg, dict) else getattr(msg, "text", "")
 	if not isinstance(text, str):
 		return

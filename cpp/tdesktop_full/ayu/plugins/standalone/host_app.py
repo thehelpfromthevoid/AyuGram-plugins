@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AyuGram Plugins standalone host — runnable without building Telegram."""
+"""AyuGram Plugins standalone host - runnable without building Telegram."""
 from __future__ import annotations
 
 import json
@@ -203,7 +203,7 @@ class HostApp:
             mark = "ON" if p.enabled else "off"
             if p.error:
                 mark = "ERR"
-            self.listbox.insert(tk.END, f"[{mark}] {p.name} — {p.id}")
+            self.listbox.insert(tk.END, f"[{mark}] {p.name} - {p.id}")
             if load_enabled and p.enabled and not p.error:
                 try:
                     self.loader.load_plugin_code(p)
@@ -242,7 +242,7 @@ class HostApp:
                 "Settings", f"{pid} has no editable settings rows.")
             return
         win = tk.Toplevel(self.root)
-        win.title(f"Settings — {pid}")
+        win.title(f"Settings - {pid}")
         win.geometry("420x360")
         win.transient(self.root)
         body = ttk.Frame(win, padding=10)

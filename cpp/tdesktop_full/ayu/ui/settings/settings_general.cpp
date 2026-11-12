@@ -113,6 +113,14 @@ void BuildTranslator(SectionBuilder &builder, AyuSectionBuilder &ayu) {
 	if (button) {
 		ayu.addBetaBadge(button);
 	}
+
+	builder.addDividerText(tr::ayu_OutgoingTranslateAbout());
+	ayu.addSettingToggle({
+		.id = u"ayu/outgoingTranslateCommands"_q,
+		.title = tr::ayu_OutgoingTranslateCommands(),
+		.getter = &AyuSettings::outgoingTranslateCommands,
+		.setter = &AyuSettings::setOutgoingTranslateCommands,
+	});
 }
 
 void BuildShowPeerId(SectionBuilder &builder) {

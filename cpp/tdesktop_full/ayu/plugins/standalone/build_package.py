@@ -147,7 +147,7 @@ def build() -> Path:
         encoding="utf-8",
     )
     (built / "README.txt").write_text(
-        "AyuGram Plugins — standalone host\r\n"
+        "AyuGram Plugins - standalone host\r\n"
         "\r\n"
         "Launch: double-click START.bat or AyuGramPlugins.exe\r\n"
         "\r\n"

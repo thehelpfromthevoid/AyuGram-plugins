@@ -8,10 +8,12 @@
 
 #include "lang_auto.h"
 #include "ayu/ayu_settings.h"
+#include "ayu/plugins/ui/plugins_section.h"
 #include "ayu/ui/ayu_userpic.h"
 #include "ayu/ui/settings/ayu_builder.h"
 #include "ayu/ui/settings/settings_ayu_utils.h"
 #include "ayu/ui/settings/settings_main.h"
+#include "ayu/ui/settings/settings_plugins.h"
 #include "boxes/peer_list_box.h"
 #include "core/application.h"
 #include "data/data_user.h"
@@ -685,6 +687,7 @@ const auto kMeta = BuildHelper({
 	.icon = &st::menuIconGroupReactions,
 }, [](SectionBuilder &builder) {
 	auto ayu = AyuSectionBuilder(builder);
+	const auto controller = builder.controller();
 
 	builder.addSkip();
 	BuildGhostEssentials(builder);
@@ -694,6 +697,23 @@ const auto kMeta = BuildHelper({
 
 	ayu.addSectionDivider();
 	BuildOther(builder, ayu);
+
+	ayu.addSectionDivider();
+	builder.addSectionButton({
+		.title = tr::ayu_PluginsHeader(),
+		.targetSection = AyuPlugins::Id(),
+		.icon = { &st::menuIconManage },
+	});
+	builder.addButton({
+		.id = u"ayu/plugins/open-modal"_q,
+		.title = tr::ayu_PluginsManage(),
+		.icon = { &st::menuIconManage },
+		.onClick = [=] {
+			if (controller) {
+				Ayu::Plugins::Ui::ShowPluginsManageBox(controller);
+			}
+		},
+	});
 	builder.addSkip();
 });
 
