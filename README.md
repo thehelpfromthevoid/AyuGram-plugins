@@ -33,6 +33,79 @@ AyuGram-plugins/
 └── README.md                     # Этот файл
 ```
 
+## Плагины: скачать и сделать свой
+
+AyuGram запускает Python-плагины прямо внутри приложения. Отдельная программа
+для этого не нужна: плагин - папка с `main.py` и манифестом, которую кладут в
+`%APPDATA%\AyuGramDesktop\plugins`, и она появляется в **Настройки → Плагины**.
+
+### Поставить готовый плагин
+
+Из самого приложения: меню **Настройки → Плагины** предлагает установку из файла
+и из папки. Также подходят `.zip`, `.ayupack`, `.ayu`, `.tgx` и архивы `.tar.*` -
+распаковываются автоматически. Точку входа ищут среди `main.py`, `__init__.py`,
+`plugin.py`, `bot.py` и других имён; полный список - в `docs/desktop_guide.md`.
+
+Вручную: положите папку в `%APPDATA%\AyuGramDesktop\plugins` и выберите
+перезагрузку плагинов в том же меню. Приложение следит за папкой и перезагружает
+изменённый плагин само.
+
+### Сделать свой плагин
+
+Минимум - два файла:
+
+```
+my_plugin/
+├── main.py            # точка входа (обязательно)
+└── plugin.json        # манифест
+```
+
+`plugin.json`:
+
+```json
+{
+  "id": "com.example.my-plugin",
+  "name": "Мой плагин",
+  "description": "Что делает плагин",
+  "author": "Вы",
+  "version": "1.0.0",
+  "entry": "main.py",
+  "hooks": ["on_message"],
+  "api_version": 1
+}
+```
+
+`main.py`:
+
+```python
+from ayu_api import hook, toast
+
+@hook("on_message")
+def on_message(msg):
+    toast(msg.text)
+```
+
+Требуются только `id`, `name`, `entry` и `api_version=1`. Хук выполняется под
+блокировкой интерпретатора: держите его короче 250 мс, тяжёлую работу уносите в
+свой поток. Доступные хуки: `on_message`, `on_message_sending`,
+`on_message_deleted`, `on_chat_opened`, `on_app_start`, `on_app_stop`,
+`on_setting_changed`.
+
+### Документация
+
+| Документ | О чём |
+|----------|-------|
+| `docs/desktop_guide.md` | Полное руководство: установка, хуки, разрешения, `ayu_api`, настройки, отладка, частые проблемы |
+| `docs/quickstart.md` | Первый плагин за пять минут: layout, манифест, шаблоны |
+| `docs/api_reference.md` | Справочник API v1: `ayu_api`, `ayugram_compat` |
+| `docs/migration_from_mobile.md` | Перенос Android-плагинов (exteraGram) на Desktop |
+| `docs/security_model.md` | Песочница, разрешения, что плагину недоступно |
+| `examples/` | 18 рабочих примеров: команды, таймеры, настройки, хранение состояния |
+
+Диагностика: **Настройки → Плагины → Проверить плагины** показывает по каждому
+плагину вердикт и причину. Из командной строки - `Plugins.bat doctor` и
+`Plugins.bat log <id>`.
+
 ## Что исправлено
 
 ### Python standalone host
