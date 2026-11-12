@@ -288,10 +288,11 @@ def send_request(request: Any, callback: Optional[Callable] = None, account: int
 
 	Two very different things arrive under this name. Mobile plugins use it for
 	raw MTProto, which Desktop cannot do, but they also use it for plain HTTP:
-	custom_nickname builds a urllib request for the weather and the exchange rate
-	and passes it here. That used to be discarded with a log line, so the callback
-	fired with None every time and the plugin's weather and currency panels stayed
-	permanently empty - the request was never the problem, only being thrown away.
+	a weather plugin builds a urllib request for the weather and the exchange
+	rate and passes it here. That used to be discarded with a log line, so the
+	callback fired with None every time and the plugin's weather and currency
+	panels stayed permanently empty - the request was never the problem, only
+	being thrown away.
 
 	An HTTP request is therefore actually performed. It is dispatched onto a
 	worker thread, because a plugin calls this from its command hook and blocking

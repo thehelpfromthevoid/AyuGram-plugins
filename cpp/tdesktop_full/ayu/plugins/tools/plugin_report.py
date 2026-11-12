@@ -153,10 +153,10 @@ def enabled_ids(root: Path) -> dict:
 def switched_off_by_itself(directory: Path) -> bool:
 	"""True when the plugin's own settings say it should do nothing.
 
-	`custom_nickname` reads an `enabled` setting of its own and arms nothing when
-	it is false. Listed as "no events on Desktop" that reads as a broken plugin
-	rather than one somebody turned off, which is the opposite of what happened
-	and sends the next person looking in the wrong place.
+	A plugin may read an `enabled` setting of its own and arm nothing when it is
+	false. Listed as "no events on Desktop" that reads as a broken plugin rather
+	than one somebody turned off, which is the opposite of what happened and
+	sends the next person looking in the wrong place.
 	"""
 	path = directory.with_suffix(".settings.json")
 	if not path.is_file():
@@ -177,10 +177,10 @@ def switched_off_by_itself(directory: Path) -> bool:
 def _watch_self_driving(record: list):
 	"""Notice a plugin that keeps itself running without any event.
 
-	Some plugins are supposed to be event-free: custom_nickname arms a repeating
-	queue task and does its work on a timer, and there is nothing for it to hook.
-	Counting only subscriptions called that "no events" and listed a working
-	plugin among the dead ones, which is the opposite of what this report is for.
+	Some plugins are supposed to be event-free: one arms a repeating queue task
+	and does its work on a timer, and there is nothing for it to hook. Counting
+	only subscriptions called that "no events" and listed a working plugin among
+	the dead ones, which is the opposite of what this report is for.
 
 	The shim is patched before a plugin is imported, because a plugin does
 	`from client_utils import run_on_queue` at module level and would otherwise

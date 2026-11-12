@@ -414,8 +414,9 @@ void FlushTyping() {
 	// The cause is not the plumbing, which delivers on a queue of its own
 	// precisely so that plugin code stays off the thread that draws the window.
 	// It is that a plugin handler is ordinary Python: while it runs, nothing
-	// else in the process can. draft_ghost reacts to typing by spawning session
-	// bookkeeping of its own, and that work ends up under the same lock.
+	// else in the process can. A typing-indicator plugin reacts to typing by
+	// spawning session bookkeeping of its own, and that work ends up under the
+	// same lock.
 	//
 	// So the updates are counted and dropped. Re-enabling this needs the handler
 	// to be interruptible or the work to move off the interpreter entirely, and

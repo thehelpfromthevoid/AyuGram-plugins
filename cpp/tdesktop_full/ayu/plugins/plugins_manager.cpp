@@ -333,8 +333,8 @@ void Manager::setPluginSettingsSchema(
 	}
 	// Counted the same way the button is, and reported both numbers. Logging the
 	// raw array size under the name "editable rows" made every schema look
-	// larger than it was - custom_nickname reported 23 editable rows when 7 of
-	// them are headers - which sent the search for missing settings in the wrong
+	// larger than it was - one plugin reported 23 editable rows when 7 of them
+	// are headers - which sent the search for missing settings in the wrong
 	// direction entirely.
 	LOG(("AyuPlugins: settings schema for %1: %2 rows, %3 editable")
 		.arg(id)
