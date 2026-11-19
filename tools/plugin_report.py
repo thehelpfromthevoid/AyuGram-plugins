@@ -55,11 +55,32 @@ LOADER = next(
 	SHIM)
 DEFAULT_ROOT = Path(os.environ["AYU_PLUGINS_DIR"]) if os.environ.get("AYU_PLUGINS_DIR") else (Path(os.environ["APPDATA"]) / "AyuGramDesktop" / "plugins")
 
+# Папки, которые лежат рядом с плагинами, но плагинами не являются:
+# мост совместимости, автономный загрузчик, песочница, образцы и
+# инструменты. Их файлы - обычный код клиента. Без этого списка отчёт
+# писал «не грузится: no entry script» про shim и standalone, то есть
+# обвинял в поломке собственные служебные папки AyuGram.
+NOT_PLUGINS = {
+	"shim",
+	"standalone",
+	"sandbox",
+	"examples",
+	"tools",
+	"desktop",
+	"docs",
+	"bridge",
+	"ui",
+}
+
 
 class Bridge:
 	def __init__(self) -> None:
 		self.hooks: dict = {}
 		self.sent = 0
+		# API, которым плагин доказал, что умеет работать. Закрепление в
+		# поиске не подписывается ни на один хук: оно зовёт клиент напрямую,
+		# и по подпискам такой плагин выглядел бы мёртвым.
+		self.used_api: set = set()
 
 	def deliver(self, hook_name: str, *args) -> int:
 		"""Вызывает подписчиков события, как это делает клиент.
@@ -90,6 +111,16 @@ class Bridge:
 			return _hook
 		if name in ("send_text", "send_message"):
 			return lambda *a, **k: self.sent or 1
+		if name in ("search_pin", "search_unpin", "search_pinned",
+					"search_is_pinned"):
+			# Закрепление в поиске идёт через нативный API клиента, а не
+			# через хук. Отмечаем вызов, чтобы плагин не сочли мёртвым
+			# только из-за отсутствия подписок.
+			self.used_api.add(name)
+
+			# Ответ без разбора аргументов: проверка интересуется фактом
+			# вызова, а не тем, что именно плагин закрепил.
+			return lambda *a, **k: name == "search_pinned"
 		if name == "toast":
 			return lambda *a, **k: None
 		if name == "run_on_main_thread":
@@ -122,10 +153,10 @@ def enabled_ids(root: Path) -> dict:
 def switched_off_by_itself(directory: Path) -> bool:
 	"""True when the plugin's own settings say it should do nothing.
 
-	`custom_nickname` reads an `enabled` setting of its own and arms nothing when
-	it is false. Listed as "no events on Desktop" that reads as a broken plugin
-	rather than one somebody turned off, which is the opposite of what happened
-	and sends the next person looking in the wrong place.
+	A plugin may read an `enabled` setting of its own and arm nothing when it is
+	false. Listed as "no events on Desktop" that reads as a broken plugin rather
+	than one somebody turned off, which is the opposite of what happened and
+	sends the next person looking in the wrong place.
 	"""
 	path = directory.with_suffix(".settings.json")
 	if not path.is_file():
@@ -146,10 +177,10 @@ def switched_off_by_itself(directory: Path) -> bool:
 def _watch_self_driving(record: list):
 	"""Notice a plugin that keeps itself running without any event.
 
-	Some plugins are supposed to be event-free: custom_nickname arms a repeating
-	queue task and does its work on a timer, and there is nothing for it to hook.
-	Counting only subscriptions called that "no events" and listed a working
-	plugin among the dead ones, which is the opposite of what this report is for.
+	Some plugins are supposed to be event-free: one arms a repeating queue task
+	and does its work on a timer, and there is nothing for it to hook. Counting
+	only subscriptions called that "no events" and listed a working plugin among
+	the dead ones, which is the opposite of what this report is for.
 
 	The shim is patched before a plugin is imported, because a plugin does
 	`from client_utils import run_on_queue` at module level and would otherwise
@@ -226,6 +257,7 @@ def load(directory: Path, bridge: Bridge):
 def main() -> int:
 	global ROOT
 	ROOT = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_ROOT
+
 	for path in (str(SHIM), str(LOADER), str(HERE)):
 		if path not in sys.path:
 			sys.path.insert(0, path)
@@ -244,13 +276,25 @@ def main() -> int:
 	_watch_self_driving(self_driven)
 
 	state = enabled_ids(ROOT)
+	# Список читается один раз и до цикла: он нужен и при построении
+	# таблицы, и в итогах. Раньше он вычислялся в конце, и таблица
+	# обращалась к переменной, которая ещё не была определена - отчёт
+	# падал целиком вместо того, чтобы показать строку.
+	ANDROID_ONLY = _android_only_ids()
 	rows = []
 	for directory in sorted(ROOT.iterdir()):
+		# Инфраструктура клиента лежит рядом с плагинами, но плагином не
+		# является. Без этой проверки отчёт писал «не грузится: no entry
+		# script» про shim и standalone - то есть обвинял в поломке
+		# собственные служебные папки AyuGram.
+		if directory.name in NOT_PLUGINS:
+			continue
 		if not directory.is_dir() or not list(directory.glob("*.py")):
 			continue
 		pid = directory.name
 		on = bool(state.get(pid, False))
 		bridge.hooks.clear()
+		bridge.used_api.clear()
 		self_driven.clear()
 		before = set(stubs_used())
 		try:
@@ -269,9 +313,27 @@ def main() -> int:
 						 "события не нужны, само " + ", ".join(
 							 sorted(set(self_driven))),
 						 _trim(reached)))
+		elif bridge.used_api:
+			# Плагин доказал, что работает, нативным API: так делает
+			# закрепление в поиске. Без этой строки он попадал в молчащие
+			# только потому, что не подписывается ни на один хук.
+			rows.append((pid, on, "работает",
+						 "через клиентский API: " + ", ".join(
+							 sorted(bridge.used_api)),
+						 _trim(reached)))
 		elif switched_off_by_itself(directory):
 			rows.append((pid, on, "выключен",
 						 "выключен своими настройками, это не поломка",
+						 _trim(reached)))
+		elif pid in ANDROID_ONLY:
+			# Android-only показываем в таблице тем же вердиктом, что и
+			# в итогах. Раньше он попадал в «молчит», и таблица говорила
+			# одно, а счётчик внизу - другое: пользователь видел
+			# «молчит» рядом со строкой «только для Android, чинить
+			# нечем», и это выглядело как противоречие, а не как
+			# объяснение.
+			rows.append((pid, on, "только Android",
+						 "переносу на Desktop не поддаётся",
 						 _trim(reached)))
 		else:
 			rows.append((pid, on, "молчит",
@@ -291,13 +353,12 @@ def main() -> int:
 	silent = [r[0] for r in rows if r[2] == "молчит"]
 	off = [r[0] for r in rows if r[2] == "выключен"]
 	broken = [r[0] for r in rows if r[2] == "не грузится"]
-	# Android-only показываем отдельно от сломанных: первый случай чинить
-	# нечем, и называть его сломанным значит обещать работу, которой не будет.
-	# Список берём файлом, а не импортом шима: импорт здесь менял то, как
-	# грузятся плагины, и счётчик внизу сбивался.
-	only_android = _android_only_ids()
-	fixable = [n for n in silent + broken if n not in only_android]
-	only_android = [n for n in only_android if n in silent or n in broken]
+	# Список берём файлом, а не импортом шима: импорт здесь менял то,
+	# как грузятся плагины, и счётчик внизу сбивался.
+	# Android-only в таблице больше не попадает в «молчит», поэтому он
+	# отделяется здесь напрямую, а не вычитанием из молчащих.
+	only_android = [r[0] for r in rows if r[2] == "только Android"]
+	fixable = [n for n in silent + broken if n not in ANDROID_ONLY]
 	print()
 	print(f"{working} из {len(rows)} делают что-то на Desktop")
 	if only_android:
@@ -307,7 +368,7 @@ def main() -> int:
 		print("молчат, есть смысл чинить: " + ", ".join(fixable))
 	if off:
 		print("выключены своими настройками: " + ", ".join(off))
-	left = [n for n in broken if n not in only_android]
+	left = [n for n in broken if n not in ANDROID_ONLY]
 	if left:
 		print("не грузятся: " + ", ".join(left))
 	return 0
@@ -393,6 +454,27 @@ def _synthesise(bridge) -> None:
 	bridge.deliver("on_chat_opened", 0, Chat())
 	bridge.deliver("on_typing", 0, Typing())
 	bridge.deliver("on_message_deleted", 4242, [1])
+	# Media sending was never delivered, so a plugin acting on it -
+	# replacing a file before it goes out - looked as dead as one
+	# that really does nothing.
+	class Media:
+		size = 10
+		kind = 0
+		sticker = False
+		caption = ""
+		name = "probe.webm"
+		path = ""
+		replacement_path = ""
+	
+	class Sending:
+		cancel = False
+		text = ""
+		account = 0
+		peer_id = 4242
+		message = Msg()
+		media = []
+	
+	bridge.deliver("on_media_sending", 0, Sending())
 
 
 def _trim(names: list, limit: int = 6) -> str:

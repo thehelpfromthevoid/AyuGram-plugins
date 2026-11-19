@@ -73,8 +73,15 @@ class HostApp:
         self.loader = PluginLoader(self.plugins_root)
         self.msg_counter = 1
         self._all_plugins = []
+        self._filtered_plugins = []
 
         ayu_api.set_sinks(toast=self._on_toast, log=self._on_log)
+        
+        # Modern UI styling
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        self.style.configure("TButton", padding=5, font=("Segoe UI", 9))
+        self.style.configure("Header.TLabel", font=("Segoe UI", 11, "bold"), foreground="#007acc")
 
         self._build_ui()
         self.reload_plugins()
@@ -116,10 +123,8 @@ class HostApp:
         self.listbox = tk.Listbox(left, exportselection=False)
         self.listbox.pack(fill=tk.BOTH, expand=True, pady=4)
         self.listbox.bind("<<ListboxSelect>>", lambda _e: self._show_selected())
-        # Color tags for status
-        self.listbox.tag_configure("on", foreground="#007acc")
-        self.listbox.tag_configure("off", foreground="#888888")
-        self.listbox.tag_configure("err", foreground="#c00000")
+        # Status colours are set per row with Listbox.itemconfig in
+        # _filter_plugins: Listbox has no tag_configure (that is Text/Canvas).
 
         btns = ttk.Frame(left)
         btns.pack(fill=tk.X)
@@ -139,6 +144,11 @@ class HostApp:
             left, height=10, wrap=tk.WORD, state=tk.DISABLED
         )
         self.detail_text.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        # Colour tags for the detail panel (Text widget supports tag_configure).
+        self.detail_text.tag_configure("label", font=("Segoe UI", 9, "bold"))
+        self.detail_text.tag_configure("value", font=("Segoe UI", 9))
+        self.detail_text.tag_configure("err", foreground="#c00000")
+        self.detail_text.tag_configure("on", foreground="#008000")
 
         sim = ttk.LabelFrame(right, text="Simulate Telegram events", padding=8)
         sim.pack(fill=tk.X)
@@ -173,15 +183,27 @@ class HostApp:
         self.log = scrolledtext.ScrolledText(log_frame, height=18, wrap=tk.WORD)
         self.log.pack(fill=tk.BOTH, expand=True)
         self.log.configure(state=tk.DISABLED)
-
-        status = ttk.Frame(self.root, padding=(8, 0, 8, 8))
-        status.pack(fill=tk.X)
-        self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(status, textvariable=self.status_var).pack(side=tk.LEFT)
+        
+        # Log coloring
+        self.log.tag_configure("log_toast", foreground="#007acc")
+        self.log.tag_configure("log_err", foreground="#c00000")
+        self.log.tag_configure("log_warn", foreground="#a67c00")
+        self.log.tag_configure("log_system", foreground="#666666")
 
     def _append_log(self, line: str) -> None:
         self.log.configure(state=tk.NORMAL)
-        self.log.insert(tk.END, line + "\n")
+        
+        tag = None
+        if line.startswith("[toast]"):
+            tag = "log_toast"
+        elif "[error]" in line.lower() or "failed" in line.lower() or "exception" in line.lower():
+            tag = "log_err"
+        elif "[warning]" in line.lower() or "warn" in line.lower():
+            tag = "log_warn"
+        elif line.startswith("[loader]") or line.startswith("[system]"):
+            tag = "log_system"
+            
+        self.log.insert(tk.END, line + "\n", (tag,) if tag else ())
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
 
@@ -305,7 +327,7 @@ class HostApp:
         canvas = tk.Canvas(container, highlightthickness=0)
         scrollbar = ttk.Scrollbar(
             container, orient=tk.VERTICAL, command=canvas.yview)
-        settings_frame = ttk.Frame(canvas)
+        settings_frame = ttk.Frame(canvas, padding=(0, 0, 10, 0))
         settings_frame.bind(
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -444,54 +466,61 @@ class HostApp:
         if not sel:
             return None
         idx = sel[0]
-        plugins = list(self.loader.plugins.values())
-        if idx >= len(plugins):
+        if idx >= len(self._filtered_plugins):
             return None
-        return plugins[idx].id
+        return self._filtered_plugins[idx].id
 
     def _filter_plugins(self) -> None:
         """Show only listbox items matching the search text."""
         query = self.filter_var.get().strip().lower()
         self.listbox.delete(0, tk.END)
+        self._filtered_plugins = []
         for p in self._all_plugins:
             haystack = f"{p.name} {p.id} {p.description or ''} {p.author or ''}".lower()
             if query and query not in haystack:
                 continue
-            mark = "ON" if p.enabled else "off"
-            tag = None
+            self._filtered_plugins.append(p)
+            symbol = "●" if p.enabled else "○"
+            mark = f"{symbol} ON" if p.enabled else f"{symbol} off"
+            color = "#007acc"  # enabled
             if p.error:
-                mark = "ERR"
-                tag = "err"
-            elif p.enabled:
-                tag = "on"
-            else:
-                tag = "off"
-            self.listbox.insert(tk.END, f"[{mark}] {p.name} - {p.id}", (tag,))
+                mark = "⚠ ERR"
+                color = "#c00000"
+            elif not p.enabled:
+                color = "#888888"
+            self.listbox.insert(tk.END, f"{mark:<7} {p.name} ({p.id})")
+            self.listbox.itemconfig(tk.END, foreground=color)
 
     def _show_selected(self) -> None:
         pid = self._selected_id()
         self.detail_text.configure(state=tk.NORMAL)
         self.detail_text.delete("1.0", tk.END)
         if not pid:
-            self.detail_text.insert(tk.END, "Select a plugin")
+            self.detail_text.insert(tk.END, "Select a plugin", "value")
             self.detail_text.configure(state=tk.DISABLED)
             return
         p = self.loader.plugins.get(pid)
         if p is None:
-            self.detail_text.insert(tk.END, "Plugin not found")
+            self.detail_text.insert(tk.END, "Plugin not found", "err")
             self.detail_text.configure(state=tk.DISABLED)
             return
-        lines = [
-            f"Name:   {p.name}",
-            f"ID:     {p.id}",
-            f"Version: {p.version}",
-            f"Author: {p.author}",
-            f"Enabled: {'yes' if p.enabled else 'no'}",
-            f"Error:   {p.error or '-'}",
-            f"Hooks:   {', '.join(p.hooks) or '-'}",
-            f"Description: {p.description or '-'}",
-        ]
-        self.detail_text.insert(tk.END, "\n".join(lines))
+
+        def insert_field(label: str, value: str, tag: str = "value"):
+            self.detail_text.insert(tk.END, f"{label:<12}", "label")
+            self.detail_text.insert(tk.END, f"{value}\n", tag)
+
+        insert_field("Name:", p.name)
+        insert_field("ID:", p.id)
+        insert_field("Version:", p.version)
+        insert_field("Author:", p.author or "-")
+        status_tag = "on" if p.enabled else "value"
+        insert_field("Enabled:", "yes" if p.enabled else "no", status_tag)
+        insert_field("Error:", p.error or "-", "err" if p.error else "value")
+        insert_field("Hooks:", ", ".join(p.hooks) or "-")
+        insert_field("Permissions:", ", ".join(p.permissions) or "-")
+        self.detail_text.insert(tk.END, "\nDescription:\n", "label")
+        self.detail_text.insert(tk.END, p.description or "-", "value")
+        
         self.detail_text.configure(state=tk.DISABLED)
 
     def enable_selected(self) -> None:

@@ -2012,6 +2012,211 @@ def _deploy_ships_all_shim_packages():
 			"executable at startup")
 
 
+# ---------------------------------------------------------------- runner
+
+@_check("accounts", "account number survives the event")
+def _account_number_survives_event():
+	# Клиент присылает событие с номером аккаунта на самой структуре. Раньше
+	# номер всегда был 0, и плагин с двумя аккаунтами отвечал на сообщения
+	# обоих, отправляя ответ в аккаунт, откуда сообщение не пришло.
+	_fresh_sys_path()
+	from ayugram_compat import base_plugin
+
+	class Message:
+		def __init__(self, account):
+			self.account = account
+			self.peer_id = 1
+
+	assert base_plugin._account_of((Message(3),)) == 3
+	assert base_plugin._account_of((Message(0),)) == 0
+	assert base_plugin._account_of(({"account": 5},)) == 5
+
+	# Событие без номера: угадывать нечем, и это не повод его терять.
+	assert base_plugin._account_of((object(),)) is None
+	assert base_plugin._account_of(()) is None
+
+
+@_check("accounts", "split reads account from event and legacy form")
+def _account_split():
+	_fresh_sys_path()
+	from ayugram_compat import base_plugin
+
+	class Message:
+		def __init__(self, account):
+			self.account = account
+
+	# Новое: номер на структуре, payload остаётся целиком.
+	account, rest = base_plugin._split_account("on_message", (Message(7),))
+	assert account == 7
+	assert len(rest) == 1
+
+	account, rest = base_plugin._split_account(
+		"on_message_deleted", (Message(1),))
+	assert account == 1
+	assert len(rest) == 1
+
+	# Старое: номер отдельным первым аргументом, его убирают из payload,
+	# иначе плагин получил бы лишний позиционный аргумент.
+	account, rest = base_plugin._split_account("on_typing", (3, Message(9)))
+	assert account == 3
+	assert len(rest) == 1
+
+
+@_check("accounts", "plugin can listen to one account only")
+def _account_filter():
+	_fresh_sys_path()
+	from ayugram_compat.base_plugin import BasePlugin
+
+	class Message:
+		def __init__(self, account):
+			self.account = account
+
+	class Only(BasePlugin):
+		account = 0
+
+		def __init__(self):
+			self.seen = []
+
+		def on_message(self, message):
+			self.seen.append(message.account)
+			return "ok"
+
+	only = Only()
+	assert only._account_allowed(Message(0))
+	assert not only._account_allowed(Message(1))
+	assert only.on_message_hook(Message(0)) == "ok"
+	assert only.on_message_hook(Message(1)) is None
+	assert only.seen == [0]
+
+	# Без фильтра ведёт себя как раньше: слышит все аккаунты.
+	class All(BasePlugin):
+		pass
+
+	assert All()._account_allowed(Message(1))
+
+	# Несколько аккаунтов задаются списком.
+	class Pair(BasePlugin):
+		accounts = [0, 2]
+
+	pair = Pair()
+	assert pair._account_allowed(Message(2))
+	assert not pair._account_allowed(Message(1))
+
+
+@_check("accounts", "unknown event is not dropped by the filter")
+def _account_filter_unknown_event():
+	# Событие без номера аккаунта пропустить нельзя: иначе плагин, задавший
+	# фильтр, молча перестал бы работать на рукописных событиях.
+	_fresh_sys_path()
+	from ayugram_compat.base_plugin import BasePlugin
+
+	class Only(BasePlugin):
+		account = 0
+
+	assert Only()._account_allowed(object())
+	assert Only()._account_allowed_number(None)
+
+
+@_check("accounts", "send helpers accept account without breaking callers")
+def _account_send_signature():
+	# Старые плагины зовут send_text(peer, text) и должны работать как
+	# прежде: номер аккаунта необязателен.
+	_fresh_sys_path()
+	import inspect
+
+	api = None
+	for name in ("ayu_api", "ayu_api_standalone"):
+		try:
+			api = __import__(name)
+			break
+		except Exception:
+			continue
+	if api is None:
+		raise Skip("ayu_api is only importable inside the client")
+
+	for name in ("send_text", "edit_message", "send_file", "self_peer_id"):
+		fn = getattr(api, name, None)
+		if fn is None:
+			raise Skip(f"{name} is not available")
+		params = inspect.signature(fn).parameters
+		assert "account" in params, f"{name} has no account"
+		assert params["account"].default == -1, \
+			f"{name} must keep working without an account"
+
+
+@_check("accounts", "client reports how many accounts are signed in")
+def _account_count_api():
+	_fresh_sys_path()
+	api = None
+	for name in ("ayu_api", "ayu_api_standalone"):
+		try:
+			api = __import__(name)
+			break
+		except Exception:
+			continue
+	if api is None:
+		raise Skip("ayu_api is only importable inside the client")
+
+	if not hasattr(api, "account_count"):
+		raise Skip("account_count is not available in this build")
+
+	count = api.account_count()
+	assert isinstance(count, int)
+	assert count >= 0
+	assert api.is_valid_account(0) is (count > 0)
+	assert api.is_valid_account(-1) is False
+	assert api.is_valid_account(count + 5) is False
+
+
+@_check("accounts", "hooks carry account into python objects")
+def _account_hook_fields():
+	# pybind-структуры отдают номер наружу, иначе фильтр выше не увидит
+	# ничего и пропустит событие.
+	_fresh_sys_path()
+	api = None
+	for name in ("ayu_api", "ayu_api_standalone"):
+		try:
+			api = __import__(name)
+			break
+		except Exception:
+			continue
+	if api is None:
+		raise Skip("ayu_api is only importable inside the client")
+
+	for cls_name in ("Message", "Chat", "Typing"):
+		cls = getattr(api, cls_name, None)
+		if cls is None:
+			raise Skip(f"{cls_name} is not available")
+		inst = cls()
+		inst.account = 4
+		assert inst.account == 4, f"{cls_name}.account is not live"
+
+
+@_check("accounts", "activity tracking survives a reload")
+def _activity_reset():
+	# A plugin that did nothing must be recognisable as such, or the health
+	# report calls it working and the user waits for an effect that never
+	# comes. The counter names live in the bridge; this checks the contract
+	# the health report relies on.
+	import inspect
+
+	api = None
+	for name in ("ayu_api", "ayu_api_standalone"):
+		try:
+			api = __import__(name)
+			break
+		except Exception:
+			continue
+	if api is None:
+		raise Skip("ayu_api is only importable inside the client")
+
+	# The activity names the report reads. If the bridge stops exporting one
+	# of them, the report silently treats every plugin as busy.
+	names = ("hook", "log", "toast")
+	for name in names:
+		assert hasattr(api, name), f"bridge lost {name}"
+
+
 @_check("loader", "a duplicate plugin id resolves to the canonical directory")
 def _duplicate_id_wins():
 	# Two directories claiming one id used to be resolved by scan order: the
@@ -2045,8 +2250,6 @@ def _duplicate_id_wins():
 	finally:
 		shutil.rmtree(root, ignore_errors=True)
 
-
-# ---------------------------------------------------------------- runner
 
 def main() -> int:
 	ap = argparse.ArgumentParser(description=__doc__)

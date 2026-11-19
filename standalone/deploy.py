@@ -414,7 +414,7 @@ def verify_runtime(target: Path) -> list[str]:
 
 
 def deploy(build_dir: Path, target: Path, config: str,
-		   python_dir: str | None, verbose: bool) -> list[str]:
+		   python_dir: str | None, verbose: bool, ported: bool = True) -> list[str]:
 	exe = find_exe(build_dir, config)
 	python = find_python(exe, python_dir)
 	target.mkdir(parents=True, exist_ok=True)
@@ -590,6 +590,38 @@ def deploy(build_dir: Path, target: Path, config: str,
 	copy_tree(PLUGINS / "docs", target / "docs", blocked)
 	print("docs     docs/")
 
+	# Плагины из desktop/ ставятся так же, как из examples/.
+	#
+	# Их установка стоила отдельного шага, и из-за этого раздача уезжала
+	# без них: в архив попадали только восемнадцать встроенных плагинов, а
+	# переносы - сканер, переводчик, очередь отправки, закрепление в
+	# поиске и подмена стикеров - оставались в исходниках. Человек,
+	# который скачал сборку, получал клиент, в котором из пяти новых
+	# плагинов не было ни одного, и списывал это на клиент.
+	#
+	# Правило то же: недостающее копируется, отличающееся обновляется,
+	# а пользовательское не трогается. Отличить своё от нашего нельзя,
+	# поэтому обновляется только то, что совпадает с тем, что мы
+	# раздаём: чужой файл с тем же именем останется нетронутым, если
+	# он не совпадает побайтно... но это уже отдельное решение, и ниже
+	# оно сделано консервативно - обновляется только отсутствующее.
+	installed_desktop = 0
+	desktop_dir = PLUGINS / "desktop"
+	if ported and desktop_dir.is_dir():
+		for plugin in sorted(desktop_dir.iterdir()):
+			if not plugin.is_dir() or plugin.name.startswith("_"):
+				continue
+			destination = target / "plugins" / plugin.name
+			if destination.exists():
+				# Уже стоит: пользователь мог настроить его под себя,
+				# и молчаливый overwrite здесь недопустим.
+				continue
+			copy_tree(plugin, destination, blocked)
+			installed_desktop += 1
+			print(f"desktop  {plugin.name} (installed)")
+	if installed_desktop:
+		print(f"desktop  {installed_desktop} ported plugin(s) in plugins/")
+
 	# A running application holds its crash log open, so tidying the folder is
 	# best effort: an old log left behind is harmless, but refusing to finish
 	# the deploy over one file is not.
@@ -635,6 +667,8 @@ def main() -> int:
 	ap.add_argument("--config", default="Release")
 	ap.add_argument("--to", required=True, help="target folder")
 	ap.add_argument("--python", help="Python install to take the runtime from")
+	ap.add_argument("--no-ported", action="store_true",
+	                help="skip the ported plugins in desktop/ - used when deploying over a live client folder")
 	ap.add_argument("-v", "--verbose", action="store_true")
 	args = ap.parse_args()
 
@@ -644,6 +678,7 @@ def main() -> int:
 		args.config,
 		args.python,
 		args.verbose,
+		ported=not args.no_ported,
 	)
 	if blocked:
 		# Non-zero, because the folder now holds a new runtime next to an old

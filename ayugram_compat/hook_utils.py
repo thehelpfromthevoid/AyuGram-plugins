@@ -242,7 +242,7 @@ class PluginUpdate:
 	"""A Telegram update rebuilt from a Desktop event.
 
 	A plugin that hooks raw updates expects two things: attributes on the
-	update, and the *class name* of its action. `draft_ghost` reads
+	update, and the *class name* of its action. A plugin may read
 	`type(action).__name__` to tell typing from recording, so the action is
 	built with the Telegram name as its class name and not with a friendlier
 	one.

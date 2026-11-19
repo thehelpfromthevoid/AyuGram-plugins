@@ -96,7 +96,7 @@ def main() -> int:
 		index = args.index("--command")
 		command = args[index + 1]
 		del args[index:index + 2]
-	plugin_id = args[0] if args else "ozonsearch_ozon_420"
+	plugin_id = args[0] if args else "hello-toast"
 
 	directory = ROOT / plugin_id
 	if not directory.is_dir():
