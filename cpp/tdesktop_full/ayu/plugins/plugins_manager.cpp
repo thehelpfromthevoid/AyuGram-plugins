@@ -28,6 +28,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <fstream>
+#include <tuple>
 
 namespace Ayu::Plugins {
 namespace {
@@ -90,6 +91,47 @@ void CopyTreeRecursive(const QString &from, const QString &to) {
 			fromDir.filePath(name),
 			to + u"/"_q + name);
 	}
+}
+
+// Rank a candidate when two directories claim one plugin id.
+//
+// The directory named exactly after the id is canonical (`<id>/plugin.json`);
+// an entry that carries a manifest beats a bare script tree. The last key is
+// the path, so the choice is stable and never depends on the order the
+// filesystem handed back the directories. Mirrors the Python loader's
+// _duplicate_rank, so the standalone host and the product agree on the winner.
+[[nodiscard]] auto DuplicateRank(const QString &id, const QString &dir) {
+	const auto name = QDir(dir).dirName();
+	const auto hasManifest = QFile::exists(dir + u"/plugin.json"_q)
+		|| QFile::exists(dir + u"/manifest.json"_q);
+	return std::tuple(
+		name == id,
+		hasManifest,
+		dir);
+}
+
+void StorePluginInstance(
+		std::map<QString, PluginInstance> &plugins,
+		PluginInstance &&instance) {
+	const auto id = instance.manifest.id;
+	const auto it = plugins.find(id);
+	if (it == plugins.end()) {
+		plugins.emplace(id, std::move(instance));
+		return;
+	}
+	// Two directories claim one id. Resolve it deliberately instead of
+	// letting the directory order decide: an Android reference copy sitting
+	// next to the Desktop port used to overwrite it, so the port never loaded
+	// and the Android one then failed on a module Desktop does not have.
+	if (DuplicateRank(id, it->second.dirPath)
+		>= DuplicateRank(id, instance.dirPath)) {
+		return;
+	}
+	LOG(("AyuPlugins: duplicate id %1: %2 wins over %3")
+		.arg(id)
+		.arg(QDir(instance.dirPath).dirName())
+		.arg(QDir(it->second.dirPath).dirName()));
+	it->second = std::move(instance);
 }
 
 [[nodiscard]] QString FindPluginRoot(const QString &root) {
@@ -700,14 +742,14 @@ bool Manager::loadOne(const QString &dir, QString *error) {
 		instance.state = PluginState::Disabled;
 		instance.lastError = u"built for another platform: "_q
 			+ manifest.platforms.join(u", "_q);
-		_plugins[manifest.id] = std::move(instance);
+		StorePluginInstance(_plugins, std::move(instance));
 		return true;
 	}
 	const auto enabled = _enabled.count(manifest.id)
 		? _enabled[manifest.id]
 		: true;
 	instance.state = enabled ? PluginState::Loaded : PluginState::Disabled;
-	_plugins[manifest.id] = std::move(instance);
+	StorePluginInstance(_plugins, std::move(instance));
 	return true;
 }
 
