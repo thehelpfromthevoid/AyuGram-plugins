@@ -389,6 +389,54 @@ def _health_line_is_honest():
 	_reset_modules()
 
 
+@_check("shim", "a finished timer is not kept, counted or holding its work")
+def _finished_timers_are_forgotten():
+	# `add_timer` recorded every timer in the module-level `_timers` list and
+	# nothing ever removed the entry when the timer finished. A one-shot timer
+	# (the default, repeat=1) runs once and its thread ends, but the list went
+	# on holding the function closure, the dead `threading.Thread` and the
+	# `Event` for the life of the process - and `timers_of` and the health line
+	# went on counting it. A plugin that arms a one-shot timer per event (the
+	# animation plugin does, once per keystroke) grew the list without bound.
+	import gc
+	import time as _time
+	import weakref
+
+	_reset_modules()
+	from ayugram_compat import hook_utils
+
+	assert hook_utils._timers == []
+	for _ in range(50):
+		hook_utils.add_timer(lambda: None, interval_s=0.01, repeat=1)
+
+	# Wait for every one-shot timer to finish and its thread to exit.
+	deadline = _time.monotonic() + 20
+	while _time.monotonic() < deadline:
+		if not any(t.is_alive() for (_, t, _, _) in hook_utils._timers):
+			break
+		_time.sleep(0.05)
+	_time.sleep(0.2)
+	assert hook_utils._timers == [], len(hook_utils._timers)
+	assert hook_utils.timers_of(None) == 0
+
+	# The closure is released too, not merely uncounted.
+	holder = lambda: None  # noqa: E731
+	ref = weakref.ref(holder)
+	hook_utils.add_timer(holder, interval_s=0.01, repeat=1)
+	_time.sleep(1.0)
+	del holder
+	gc.collect()
+	assert ref() is None, "a finished timer still holds its closure"
+
+	# A repeating timer stays listed until it is cancelled, then goes.
+	handle = hook_utils.add_timer(
+		lambda: None, interval_s=60, repeat=0, delay_s=3600)
+	assert hook_utils.timers_of(None) == 1
+	assert hook_utils.remove_timer(handle) is True
+	assert hook_utils._timers == []
+	_reset_modules()
+
+
 @_check("shim", "a reply stays a reply instead of becoming a plain message")
 def _reply_is_carried():
 	# replyToMsg was read and then dropped on every path, so a plugin that
@@ -1661,15 +1709,17 @@ def _timers_are_scoped():
 
 		def on_plugin_load(self):
 			# A bound method, which is how a plugin actually arms a timer and
-			# the only form whose owner can be identified.
-			hook_utils.add_timer(self.tick, 60)
+			# the only form whose owner can be identified. The long delay keeps
+			# the timer pending: a one-shot that has already fired is forgotten
+			# (see the timer-leak check), so it would not be here to scope.
+			hook_utils.add_timer(self.tick, 60, 1, 3600)
 
 	class Second(BasePlugin):
 		def tick(self):
 			alive.wait(0.01)
 
 		def on_plugin_load(self):
-			hook_utils.add_timer(self.tick, 60)
+			hook_utils.add_timer(self.tick, 60, 1, 3600)
 
 	# One plugin at a time: activate_base_plugins instantiates the first
 	# BasePlugin subclass it finds, which is the point.

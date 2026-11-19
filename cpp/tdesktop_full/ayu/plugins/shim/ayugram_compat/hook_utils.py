@@ -609,10 +609,38 @@ def command(prefix, fn=None, *, aliases=(), cancel=True):
 
 
 _timers: list = []
+_timers_lock = threading.Lock()
 # A timer whose owner cannot be identified. Kept as a value rather than None so
 # "belongs to no plugin in particular" is distinguishable from "belongs to the
 # plugin that asked", and only a global cancel stops these.
 _Unowned = object()
+
+
+def _remember_timer(entry: tuple) -> None:
+	with _timers_lock:
+		_timers.append(entry)
+
+
+def _forget_timer(stop: threading.Event) -> None:
+	"""Drop the entry for a finished timer.
+
+	A timer that has run its course is gone, and keeping its entry was a leak:
+	`_timers` held the function closure, the dead `threading.Thread` and the
+	`Event` for the life of the process, and every finished timer was still
+	counted by `timers_of` and by the health line. A plugin that arms a
+	one-shot timer per event - the animation plugin does, once per keystroke -
+	grew the list without bound.
+	"""
+	with _timers_lock:
+		for entry in list(_timers):
+			if entry[2] is stop:
+				_timers.remove(entry)
+
+
+def _timer_snapshot() -> list:
+	"""A copy of the live timer list, taken under the lock."""
+	with _timers_lock:
+		return list(_timers)
 
 
 class _TimerHandle:
@@ -641,14 +669,19 @@ def interval(seconds, fn=None):
 		stop = threading.Event()
 
 		def _loop():
-			while not stop.wait(period):
-				try:
-					f()
-				except Exception as e:
-					_log(f"interval({period:g}s) error: {e}")
+			try:
+				while not stop.wait(period):
+					try:
+						f()
+					except Exception as e:
+						_log(f"interval({period:g}s) error: {e}")
+			finally:
+				# A repeating loop only ends when it is cancelled or the app
+				# stops, but the entry must not outlive the thread either way.
+				_forget_timer(stop)
 
 		thread = threading.Thread(target=_loop, daemon=True)
-		_timers.append((f, thread, stop, _timer_owner(f)))
+		_remember_timer((f, thread, stop, _timer_owner(f)))
 		thread.start()
 		return f
 
@@ -669,23 +702,29 @@ def add_timer(fn, interval_s: float = 1.0, repeat: int = 1, delay_s=None):
 	handle = _TimerHandle(stop)
 
 	def _loop():
-		if delay_s:
-			if stop.wait(max(0.0, float(delay_s))):
-				return
-		times = 1 if repeat is None else max(1, int(repeat))
-		for _ in range(times):
-			if stop.is_set():
-				return
-			try:
-				fn()
-			except Exception as e:
-				_log(f"add_timer({interval_s}) error: {e}")
-				return
-			if times > 1 and stop.wait(max(0.0, float(interval_s))):
-				return
+		try:
+			if delay_s:
+				if stop.wait(max(0.0, float(delay_s))):
+					return
+			times = 1 if repeat is None else max(1, int(repeat))
+			for _ in range(times):
+				if stop.is_set():
+					return
+				try:
+					fn()
+				except Exception as e:
+					_log(f"add_timer({interval_s}) error: {e}")
+					return
+				if times > 1 and stop.wait(max(0.0, float(interval_s))):
+					return
+		finally:
+			# Whether it ran once, repeated and was cancelled, or raised, the
+			# entry goes: a one-shot timer that has fired has no business being
+			# counted as live or holding its closure.
+			_forget_timer(stop)
 
 	thread = threading.Thread(target=_loop, daemon=True)
-	_timers.append((fn, thread, stop, _timer_owner(fn)))
+	_remember_timer((fn, thread, stop, _timer_owner(fn)))
 	thread.start()
 	handle.started = thread
 	return handle
@@ -720,9 +759,7 @@ def remove_timer(handle) -> bool:
 	if stop is None:
 		return False
 	stop.set()
-	for entry in list(_timers):
-		if entry[2] is stop:
-			_timers.remove(entry)
+	_forget_timer(stop)
 	return True
 
 
@@ -764,17 +801,18 @@ def cancel_all_timers(owner: Any = None) -> int:
 	no longer has to be guessed.
 	"""
 	count = 0
-	remaining = []
-	for entry in list(_timers):
-		if owner is not None and _entry_owner(entry, owner) is not owner:
-			remaining.append(entry)
-			continue
-		try:
-			entry[2].set()
-			count += 1
-		except Exception:
-			pass
-	_timers[:] = remaining
+	with _timers_lock:
+		remaining = []
+		for entry in _timers:
+			if owner is not None and _entry_owner(entry, owner) is not owner:
+				remaining.append(entry)
+				continue
+			try:
+				entry[2].set()
+				count += 1
+			except Exception:
+				pass
+		_timers[:] = remaining
 	return count
 
 
@@ -787,9 +825,9 @@ def timers_of(owner: Any) -> int:
 	busy plugin from a broken one.
 	"""
 	if owner is None:
-		return len(_timers)
+		return len(_timer_snapshot())
 	return sum(
-		1 for entry in _timers if _entry_owner(entry, owner) is owner)
+		1 for entry in _timer_snapshot() if _entry_owner(entry, owner) is owner)
 
 
 def release_instance(instance: Any) -> int:
