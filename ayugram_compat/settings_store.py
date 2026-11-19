@@ -102,6 +102,10 @@ def coerce(default: Any, raw: Any) -> Any:
 	with 'int' object has no attribute 'strip'. A dialog that wrote the field as
 	numeric had stored exactly that. The declared default is the plugin's own
 	statement of what the setting holds, so it decides the type on the way out.
+
+	The native layer only handles the string cases it can answer for
+	identically to Python and reports "declined" for the rest, so anything
+	here that Python alone understands still lands in the code below.
 	"""
 	if isinstance(default, str):
 		if isinstance(raw, (int, float)) and not isinstance(raw, bool):
@@ -112,6 +116,9 @@ def coerce(default: Any, raw: Any) -> Any:
 			return str(raw)
 	if not isinstance(raw, str):
 		return raw
+	native = _coerce_native(default, raw)
+	if native is not _DECLINED:
+		return native
 	if isinstance(default, bool):
 		return raw.strip().lower() in ("1", "true", "yes", "on", "да")
 	if isinstance(default, int) and not isinstance(default, bool):
@@ -128,6 +135,39 @@ def coerce(default: Any, raw: Any) -> Any:
 		parts = [p.strip() for p in raw.split(",") if p.strip()]
 		return type(default)(parts)
 	return raw
+
+
+_DECLINED = object()
+
+
+def _coerce_native(default: Any, raw: str) -> Any:
+	"""The native answer for a string `raw`, or `_DECLINED`.
+
+	Only called when `raw` is a string. The native side answers for ASCII
+	input alone and declines everything else, so a value like "да" still goes
+	through the Python branch untouched.
+	"""
+	fast = _fast()
+	if fast is None:
+		return _DECLINED
+	try:
+		if isinstance(default, bool):
+			answer = fast.coerce_bool(raw)
+			return _DECLINED if answer is None else answer
+		if isinstance(default, int) and not isinstance(default, bool):
+			answer = fast.coerce_int(raw)
+			return _DECLINED if answer is None else answer
+		if isinstance(default, float):
+			answer = fast.coerce_float(raw)
+			return _DECLINED if answer is None else answer
+		if isinstance(default, (list, tuple)):
+			parts = fast.coerce_list(raw)
+			if parts is None:
+				return _DECLINED
+			return type(default)(parts)
+	except Exception:
+		return _DECLINED
+	return _DECLINED
 
 
 _coerce = coerce

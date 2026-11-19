@@ -101,9 +101,24 @@ def _is_account(value: Any) -> bool:
 	return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _fast():
+    """The native fast path, or None when it is unavailable (never raises)."""
+    try:
+        from ayugram_compat import fast
+    except Exception:
+        return None
+    return fast
+
+
 def _is_container(name: str) -> bool:
     """True for Telegram's update containers rather than an update itself."""
     low = str(name or "").lower()
+    fast = _fast()
+    if fast is not None:
+        try:
+            return fast.is_container(low)
+        except Exception:
+            pass
     return low.startswith("tl_updates") or low in ("updates", "updatescombined")
 
 

@@ -204,6 +204,139 @@ def main() -> int:
 			continue
 		check(f"manifest {document[:40]}", native == python, f"\n    native={native}\n    python={python}")
 
+	# --- hook name parity (native vs python mirror)
+	hook_names = [
+		"on_message", "New-Message", "message_received", "on_settings_changed",
+		"on_app_quit", "on_send_media", "please_send_message",
+		"when_chat_will_open", "message_delete_later", "TL_updateNewMessage",
+		"TL_updateShortChatMessage", "TL_updateDeleteMessages",
+		"TL_updateUserTyping", "TL_updateSomethingElse",
+		"com.example.Notify", "my_custom_event", "", "My_Custom_Event",
+		"ON_APP_START", "on_typing", "typing",
+	]
+	for raw in hook_names:
+		native = fast.hook_name(raw)
+		python = fast._python_hook_name(raw)
+		check(f"hook_name {raw!r}", native == python, f"{native!r} vs {python!r}")
+
+	# --- container parity
+	for raw in ["TL_updates", "updates", "UpdatesCombined", "TL_updateNewMessage", "", "on_message"]:
+		low = raw.lower()
+		mirror = low.startswith("tl_updates") or low in ("updates", "updatescombined")
+		check(f"container {raw!r}", fast.is_container(raw) == mirror,
+		      f"{fast.is_container(raw)} vs {mirror}")
+
+	# --- pick_update_name parity
+	namelists = [
+		["TL_updateUserTyping", "TL_updateChatUserTyping", "TL_updateChannelUserTyping"],
+		["weird_name", "other"],
+		["a", "TL_updateNewChannelMessage"],
+		["a", "TL_updateDeleteMessages"],
+		[],
+	]
+	for names in namelists:
+		for event in ("on_typing", "on_message", "on_message_deleted", "on_chat_opened"):
+			for kind in (-1, 0, 1, 2, 9):
+				native = fast.pick_update_name(names, event, kind)
+				python = fast._python_pick_update_name([str(n) for n in names], event, kind)
+				check(f"pick {names[:1]} {event} k={kind}", native == python,
+				      f"{native!r} vs {python!r}")
+
+	# --- telegram method parity
+	method_cases = [
+		("TL_users.getFullUser", []),
+		("Request", [None, "not_a_tl", "TL_account.updateProfile"]),
+		("Request", ["plain"]),
+		("Request", []),
+	]
+	for class_name, values in method_cases:
+		native = fast.telegram_method_name(class_name, values)
+		python = fast._python_telegram_method_name(class_name,
+			[None if v is None else str(v) for v in values])
+		check(f"method {class_name} {values[:1]}", native == python, f"{native!r} vs {python!r}")
+
+	# --- coerce parity: native must agree with Python wherever it answers
+	def python_coerce(default, raw):
+		# The original body, verbatim, as the reference.
+		if isinstance(default, str):
+			if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+				return str(raw)
+		if not isinstance(raw, str):
+			return raw
+		if isinstance(default, bool):
+			return raw.strip().lower() in ("1", "true", "yes", "on", "да")
+		if isinstance(default, int) and not isinstance(default, bool):
+			try:
+				return int(raw.strip())
+			except Exception:
+				return default
+		if isinstance(default, float):
+			try:
+				return float(raw.strip())
+			except Exception:
+				return default
+		if isinstance(default, (list, tuple)):
+			parts = [p.strip() for p in raw.split(",") if p.strip()]
+			return type(default)(parts)
+		return raw
+
+	def same(a, b):
+		# NaN is never equal to itself, and both sides may legitimately be one.
+		if isinstance(a, float) and isinstance(b, float) and a != a and b != b:
+			return True
+		return a == b
+
+	coerce_cases = [
+		(True, "1"), (True, " true "), (True, "YES"), (True, "on"), (True, "0"),
+		(True, "nope"), (True, ""), (True, "да"), (True, "Нет"),
+		(0, "42"), (0, " -7 "), (0, "007"), (0, "+5"), (0, "1_0"),
+		(0, "١٢"), (0, ""), (0, "-"), (0, "99999999999999999999999"),
+		(0.0, "0.5"), (0.0, " -2 "), (0.0, "1e3"), (0.0, "1.5E-2"),
+		(0.0, ".5"), (0.0, "inf"), (0.0, "nan"),
+		([], "a, b ,c"), ([], " , ,"), ([], "only"), ((), "x,y"),
+	]
+	for default, raw in coerce_cases:
+		native = settings_store.coerce(default, raw)
+		python = python_coerce(default, raw)
+		check(f"coerce {default!r} {raw!r}", same(native, python),
+		      f"{native!r} vs {python!r}")
+
+	# Non-string raws never touch the native path and must be unchanged.
+	for default, raw in [(0, 5), (True, 1), ("x", 3), (0.0, 2), ([], [1, 2])]:
+		check(f"coerce passthrough {default!r} {raw!r}",
+		      settings_store.coerce(default, raw) == python_coerce(default, raw), "")
+
+	# --- command parsing parity (native vs the Python split in hook_utils)
+	def python_command(raw, prefixes):
+		# The real caller (`_dispatch`) passes text after `.strip()`; mirror that.
+		raw = raw.strip()
+		first = raw.split(None, 1)
+		if not first or first[0].lower() not in prefixes:
+			return None
+		return raw[len(first[0]):].strip().split() if len(first) > 1 else []
+
+	command_cases = [
+		("/ping", ["/ping"]),
+		("  /echo   one   two ", ["/echo"]),
+		("/PING x", ["/ping"]),
+		("hello", ["/ping"]),
+		("   ", ["/ping"]),
+		("", ["/ping"]),
+		("/pinger", ["/ping"]),
+		("/p", ["/ping", "/p"]),
+		("/echo\ta\nb", ["/echo"]),
+		("/пинг", ["/ping"]),
+	]
+	for raw, prefixes in command_cases:
+		parsed = fast.parse_command(raw, prefixes)
+		if parsed is fast._DECLINED_COMMAND:
+			# Declined: the Python body must be authoritative and is what runs.
+			check(f"command declined {raw!r}", True, "")
+			continue
+		native_args = None if parsed is None else parsed["args"]
+		check(f"command {raw!r}", native_args == python_command(raw, prefixes),
+		      f"{native_args!r} vs {python_command(raw, prefixes)!r}")
+
 	# --- benchmark: cheap sanity, not a gate
 	# Fixed-width needles: no needle is a substring of another, so the only
 	# work left is the scan itself.

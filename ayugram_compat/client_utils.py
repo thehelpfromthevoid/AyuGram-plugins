@@ -346,9 +346,17 @@ def _telegram_method_name(request: Any) -> str:
 		return name
 	# Some plugins build the request through a helper that returns a subclass
 	# named after the call rather than after its type.
+	candidates = []
 	for attribute in ("__tl_name__", "_tl_name", "method", "__name__"):
 		value = getattr(request, attribute, None)
-		if isinstance(value, str) and value.startswith("TL_") and "." in value:
+		candidates.append(value if isinstance(value, str) else None)
+	try:
+		from ayugram_compat import fast
+		return fast.telegram_method_name(name, candidates)
+	except Exception:
+		pass
+	for value in candidates:
+		if value is not None and value.startswith("TL_") and "." in value:
 			return value
 	return ""
 
