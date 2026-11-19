@@ -1,0 +1,15 @@
+[package]
+name = "ayu-ffi"
+version.workspace = true
+edition = "2021"
+
+[lib]
+name = "ayu_fast"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ayu-core = { path = "../ayu-core" }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

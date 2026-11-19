@@ -1,0 +1,11 @@
+[package]
+name = "ayu-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aho-corasick = "1"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

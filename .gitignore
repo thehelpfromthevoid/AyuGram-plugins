@@ -38,6 +38,9 @@ venv/
 Thumbs.db
 .DS_Store
 
+# Rust
+rust/target/
+
 # Логи
 *.log
 log.txt
