@@ -37,10 +37,16 @@ if not defined PY (
 echo.
 echo Updating this folder to a build with working plugins...
 echo.
-"%PY%" "D:\TBuild\AyuGram\source\SourceFiles\ayu\plugins\standalone\deploy.py" ^
+rem The deploy script must be the one tracked in this repository: it stages
+rem the native fast layer (fast.py + ayu_fast.dll) into the shim, and it is
+rem the only copy that is updated with the rest of the sources. The former
+rem absolute path pointed at a snapshot outside version control, which
+rem mirrored the shim without the layer and therefore deleted fast.py from
+rem this folder on every run.
+"%PY%" "%~dp0cpp\tdesktop_full\ayu\plugins\standalone\deploy.py" ^
 	--build-dir "D:\TBuild\tdesktop\out" ^
 	--config Release ^
-	--to "%~dp0" --python "%PY%"
+	--to "%~dp0" --python "%PY%" --no-ported
 
 set "RC=%ERRORLEVEL%"
 echo.

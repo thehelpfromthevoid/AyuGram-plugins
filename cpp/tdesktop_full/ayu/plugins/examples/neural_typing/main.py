@@ -68,6 +68,7 @@ class NeuralTypingPlugin(BasePlugin):
 		self._timers = {}
 		self._tk = 0
 		self._lock = threading.RLock()
+		self._sending_own = False  # guard against re-entrancy: our own send_text must not re-trigger _on_sending
 		self.log("[NeuralTyping] desktop port loaded (outgoing only)")
 
 	def on_plugin_unload(self):
@@ -199,7 +200,11 @@ class NeuralTypingPlugin(BasePlugin):
 				self._stop(anim)
 				if rest.strip():
 					try:
-						send_text(anim["peer"], rest)
+						self._sending_own = True
+						try:
+							send_text(anim["peer"], rest)
+						finally:
+							self._sending_own = False
 					except Exception as e:
 						self.log(f"[NeuralTyping] tail send failed: {e}")
 				return
@@ -228,6 +233,8 @@ class NeuralTypingPlugin(BasePlugin):
 	@hook("on_message_sending")
 	def _on_sending(self, ctx):
 		try:
+			if self._sending_own:
+				return
 			if not self.get_setting("enabled", True):
 				return
 			peer = int(_attr(_attr(ctx, "message"), "peer_id", 0) or _attr(ctx, "peer_id", 0) or 0)
@@ -237,7 +244,11 @@ class NeuralTypingPlugin(BasePlugin):
 			if anim := self._skip(ctx, text, peer):
 				return
 			self._cancel(ctx)
-			self._start(peer, text)
+			self._sending_own = True
+			try:
+				self._start(peer, text)
+			finally:
+				self._sending_own = False
 		except Exception as e:
 			self.log(f"[NeuralTyping] sending hook failed: {e}\n{traceback.format_exc()}")
 

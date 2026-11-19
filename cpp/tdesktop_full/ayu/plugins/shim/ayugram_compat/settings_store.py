@@ -32,6 +32,29 @@ _LOADED: Dict[str, Dict[str, Any]] = {}
 _WRITE_ERRORS = False
 
 
+def _fast():
+	"""The native fast path when it is importable, else None.
+
+	Importing lazily keeps `settings_store` usable from `fast` itself and means
+	a missing `ayu_fast.dll` costs nothing: `fast` falls back to the same
+	behaviour written in Python.
+
+	The import is also allowed to fail outright. A deployment that ships this
+	module without `fast.py` - every tree that existed before the native layer
+	was added - must still read and write the settings files. Returning None
+	here sends the call to the JSON implementation below; letting the
+	ImportError escape instead would be caught by read(), logged, and reported
+	as an empty settings set over a file that is perfectly readable, which
+	looks exactly like the plugin having lost its settings.
+	"""
+	try:
+		from ayugram_compat import fast
+	except Exception:
+		return None
+
+	return fast
+
+
 def _appdata() -> Path:
 	base = os.environ.get("APPDATA") or os.path.expanduser("~")
 	return Path(base) / "AyuGramDesktop" / "plugins"
@@ -110,20 +133,73 @@ def coerce(default: Any, raw: Any) -> Any:
 _coerce = coerce
 
 
+def _read_file(plugin_id: str) -> tuple[Dict[str, Any], bool]:
+	"""Read one settings file. Returns `(values, had_error)`.
+
+	`fast` gets first refusal when it is importable; the JSON path below is the
+	same code `settings_store` used before the native layer existed, so a
+	deployment without it behaves exactly as it did then.
+	"""
+	fast = _fast()
+	if fast is not None:
+		try:
+			values, had_error = fast.settings_read(str(plugins_dir()), plugin_id)
+			return {str(k): v for k, v in values.items()}, bool(had_error)
+		except Exception:
+			# A broken native layer must not make the file unreadable: fall
+			# through to the direct read below.
+			pass
+	path = plugins_dir() / f"{sanitize(plugin_id)}.settings.json"
+	if not path.is_file():
+		return {}, False
+	try:
+		loaded = json.loads(path.read_text(encoding="utf-8-sig"))
+	except Exception:
+		return {}, True
+	if not isinstance(loaded, dict):
+		return {}, True
+	stored = loaded.get("settings", loaded)
+	if not isinstance(stored, dict):
+		return {}, True
+	return {str(k): v for k, v in stored.items()}, False
+
+
+def _write_file(plugin_id: str, values: Dict[str, Any]) -> bool:
+	"""Persist one settings file. `fast` first, then the JSON writer."""
+	fast = _fast()
+	if fast is not None:
+		try:
+			if fast.settings_write(str(plugins_dir()), plugin_id, values):
+				return True
+		except Exception:
+			pass
+	try:
+		directory = plugins_dir()
+		directory.mkdir(parents=True, exist_ok=True)
+		path = directory / f"{sanitize(plugin_id)}.settings.json"
+		payload = {"id": sanitize(plugin_id), "version": 1, "settings": values}
+		tmp = path.with_suffix(".tmp")
+		tmp.write_text(
+			json.dumps(payload, indent=2, ensure_ascii=False),
+			encoding="utf-8",
+		)
+		os.replace(tmp, path)
+		return True
+	except Exception:
+		return False
+
+
 def read(plugin_id: str) -> Dict[str, Any]:
 	key = sanitize(plugin_id)
 	with _LOCK:
 		if key in _CACHE:
 			return dict(_CACHE[key])
-	path = state_path(key)
 	data: Dict[str, Any] = {}
 	try:
-		if path.is_file():
-			loaded = json.loads(path.read_text(encoding="utf-8"))
-			if isinstance(loaded, dict):
-				values = loaded.get("settings", loaded)
-				if isinstance(values, dict):
-					data = {str(k): v for k, v in values.items()}
+		values, had_error = _read_file(key)
+		if had_error:
+			raise ValueError("settings file could not be read")
+		data = values
 	except Exception as e:
 		_write(f"read failed: {e}")
 	with _LOCK:
@@ -154,12 +230,8 @@ def write(plugin_id: str, values: Dict[str, Any]) -> bool:
 		# had before, with nothing in the log to say so.
 		disk: Dict[str, Any] = {}
 		try:
-			if path.is_file():
-				loaded = json.loads(path.read_text(encoding="utf-8-sig"))
-				if isinstance(loaded, dict):
-					stored = loaded.get("settings", loaded)
-					if isinstance(stored, dict):
-						disk = {str(k): v for k, v in stored.items()}
+			values_on_disk, _ = _read_file(key)
+			disk = values_on_disk
 		except Exception:
 			pass
 		with _LOCK:
@@ -173,17 +245,8 @@ def write(plugin_id: str, values: Dict[str, Any]) -> bool:
 			_CACHE[key] = dict(merged)
 			_LOADED[key] = dict(merged)
 
-		payload = {
-			"id": key,
-			"version": 1,
-			"settings": merged,
-		}
-		tmp = path.with_suffix(".tmp")
-		tmp.write_text(
-			json.dumps(payload, indent=2, ensure_ascii=False),
-			encoding="utf-8",
-		)
-		os.replace(tmp, path)
+		if not _write_file(key, merged):
+			raise OSError("settings could not be written")
 		return True
 	except Exception as e:
 		_write(f"write failed: {e}")

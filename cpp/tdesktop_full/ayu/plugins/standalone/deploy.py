@@ -86,6 +86,18 @@ SANDBOX_DIR = PLUGINS / "sandbox"
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo",
 								"_stage", "_pyi_spec", "_pyi_work")
 
+# The native fast layer is optional by construction: `fast.py` runs plain Python
+# implementations whenever `ayu_fast.dll` is missing or refuses to load, so a
+# deployment without it behaves exactly as it did before the layer existed -
+# only slower. The Python half is an ordinary shim source and travels with the
+# shim mirror above; the library is a build artefact, so it is found and copied
+# separately rather than committed into every copy of the shim - which is how
+# three divergent copies of that tree happened in the first place.
+FAST_MODULE = "fast.py"
+FAST_DLL_NAMES = ("ayu_fast.dll", "libayu_fast.so", "libayu_fast.dylib")
+# Bounded so the outward walk cannot reach a drive root on a deep checkout.
+SEARCH_DEPTH = 6
+
 
 def find_exe(build_dir: Path, config: str) -> Path:
 	for name in ("AyuGram.exe", "Telegram.exe", "AyuGram", "Telegram"):
@@ -309,6 +321,65 @@ def stage_native_libs(python: Path, target: Path,
 	return absent
 
 
+def find_native_library() -> Path | None:
+	"""The built `ayu_fast` library, or None when nothing has been built.
+
+	The library is a build artefact, unlike `fast.py`, which is an ordinary
+	shim source and is mirrored by `copy_tree` above. So this is the only
+	fast-layer file that has to be located and copied by hand.
+
+	Searching outward from this script covers all three trees it runs in: the
+	repository, `cpp/tdesktop_full/ayu/plugins`, and a build tree's
+	`SourceFiles/ayu/plugins`. The walk stops before a drive root, so a deep
+	checkout cannot make it scan the whole disk.
+	"""
+	here = HERE
+	bases = [here]
+	parent = here
+	for _ in range(SEARCH_DEPTH):
+		parent = parent.parent
+		if parent == parent.parent:
+			break
+		bases.append(parent)
+
+	for base in bases:
+		for name in FAST_DLL_NAMES:
+			for candidate in (base / "rust" / "target" / "release" / name,
+							  base / "ayugram_compat" / "native" / name,
+							  base / name):
+				if candidate.is_file():
+					return candidate
+	return None
+
+
+def stage_fast_layer(target: Path, blocked: list[str] | None = None) -> None:
+	"""Place the built library next to the shim package that was just mirrored.
+
+	`fast.py` and `settings_store.py` are shim sources and arrive with
+	`copy_tree`; only the binary has to be found and copied here. Not being
+	built is not an error - `fast.py` runs its Python implementations when the
+	library is absent, and every plugin keeps working, just slower - so this
+	reports and returns rather than failing the deploy.
+	"""
+	package = target / "ayugram_compat"
+	if not (package / FAST_MODULE).is_file():
+		print("fast     not staged (the shim does not provide fast.py)")
+		return
+
+	library = find_native_library()
+	if library is None:
+		print("fast     fast.py is running its Python fallbacks "
+			  "(build rust/ with `cargo build --release -p ayu-ffi`)")
+		return
+
+	# `fast._candidate_dirs()` looks in `ayugram_compat/native` and next to the
+	# package; `native/` keeps the app root uncluttered.
+	native = package / "native"
+	native.mkdir(parents=True, exist_ok=True)
+	if copy_file(library, native / library.name, blocked):
+		print(f"fast     {library.name} ({library.stat().st_size // 1024} KB)")
+
+
 def dist_candidates(build_dir: Path) -> list[Path]:
 	"""Folders a prepared distribution might sit in, relative to the build."""
 	out = [build_dir / "dist" / "AyuGramFullPlugins"]
@@ -343,7 +414,7 @@ def verify_runtime(target: Path) -> list[str]:
 
 
 def deploy(build_dir: Path, target: Path, config: str,
-		   python_dir: str | None, verbose: bool) -> list[str]:
+		   python_dir: str | None, verbose: bool, ported: bool = True) -> list[str]:
 	exe = find_exe(build_dir, config)
 	python = find_python(exe, python_dir)
 	target.mkdir(parents=True, exist_ok=True)
@@ -437,6 +508,8 @@ def deploy(build_dir: Path, target: Path, config: str,
 	for pkg in SHIM_PACKAGES:
 		copy_tree(shim / pkg, target / pkg, blocked)
 	print(f"shim     {len(SHIM_TOP_FILES)} files, {len(SHIM_PACKAGES)} packages")
+
+	stage_fast_layer(target, blocked)
 
 	# Without this the app starts with no permission enforcement: nothing
 	# checks what a plugin may import or write. Fail loudly rather than ship a
@@ -534,7 +607,7 @@ def deploy(build_dir: Path, target: Path, config: str,
 	# оно сделано консервативно - обновляется только отсутствующее.
 	installed_desktop = 0
 	desktop_dir = PLUGINS / "desktop"
-	if desktop_dir.is_dir():
+	if ported and desktop_dir.is_dir():
 		for plugin in sorted(desktop_dir.iterdir()):
 			if not plugin.is_dir() or plugin.name.startswith("_"):
 				continue
@@ -594,6 +667,8 @@ def main() -> int:
 	ap.add_argument("--config", default="Release")
 	ap.add_argument("--to", required=True, help="target folder")
 	ap.add_argument("--python", help="Python install to take the runtime from")
+	ap.add_argument("--no-ported", action="store_true",
+	                help="skip the ported plugins in desktop/ - used when deploying over a live client folder")
 	ap.add_argument("-v", "--verbose", action="store_true")
 	args = ap.parse_args()
 
@@ -603,6 +678,7 @@ def main() -> int:
 		args.config,
 		args.python,
 		args.verbose,
+		ported=not args.no_ported,
 	)
 	if blocked:
 		# Non-zero, because the folder now holds a new runtime next to an old

@@ -26,7 +26,19 @@ if (APP_DIR / "ayugram_compat").exists():
 elif (BUNDLE_DIR / "shim").exists():
     sys.path.insert(0, str(BUNDLE_DIR / "shim"))
 
-import ayu_api  # noqa: E402
+# Prefer native C++ ayu_api (frozen/production builds) over the pure-Python
+# stub in standalone/. APP_DIR is first on sys.path, so the stub would shadow
+# the native module. Remove it temporarily so native can be found if bundled.
+_standalone_on_path = str(APP_DIR)
+if _standalone_on_path in sys.path:
+    sys.path.remove(_standalone_on_path)
+
+try:
+    import ayu_api  # native C++ module (frozen builds)
+except ImportError:
+    sys.path.insert(0, _standalone_on_path)
+    import ayu_api  # pure-Python stub (source run)
+
 from plugin_loader import PluginLoader  # noqa: E402
 
 try:
@@ -60,8 +72,16 @@ class HostApp:
         self.plugins_root = default_plugins_root()
         self.loader = PluginLoader(self.plugins_root)
         self.msg_counter = 1
+        self._all_plugins = []
+        self._filtered_plugins = []
 
         ayu_api.set_sinks(toast=self._on_toast, log=self._on_log)
+        
+        # Modern UI styling
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        self.style.configure("TButton", padding=5, font=("Segoe UI", 9))
+        self.style.configure("Header.TLabel", font=("Segoe UI", 11, "bold"), foreground="#007acc")
 
         self._build_ui()
         self.reload_plugins()
@@ -90,10 +110,29 @@ class HostApp:
         mid.add(left, weight=1)
         mid.add(right, weight=2)
 
+        # ---- Left: plugin list + filter ----
         ttk.Label(left, text="Installed plugins").pack(anchor=tk.W)
+        filter_frame = ttk.Frame(left)
+        filter_frame.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(filter_frame, text="Search:").pack(side=tk.LEFT)
+        self.filter_var = tk.StringVar()
+        self.filter_var.trace_add("write", lambda *a: self._filter_plugins())
+        ttk.Entry(filter_frame, textvariable=self.filter_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0)
+        )
         self.listbox = tk.Listbox(left, exportselection=False)
         self.listbox.pack(fill=tk.BOTH, expand=True, pady=4)
         self.listbox.bind("<<ListboxSelect>>", lambda _e: self._show_selected())
+        # Color tags for status
+        self.listbox.tag_configure("on", foreground="#007acc")
+        self.listbox.tag_configure("off", foreground="#888888")
+        self.listbox.tag_configure("err", foreground="#c00000")
+        
+        # Color tags for detail panel
+        self.detail_text.tag_configure("label", font=("Segoe UI", 9, "bold"))
+        self.detail_text.tag_configure("value", font=("Segoe UI", 9))
+        self.detail_text.tag_configure("err", foreground="#c00000")
+        self.detail_text.tag_configure("on", foreground="#008000")
 
         btns = ttk.Frame(left)
         btns.pack(fill=tk.X)
@@ -107,10 +146,12 @@ class HostApp:
             left, text="Plugin settings…", command=self.edit_settings
         ).pack(fill=tk.X, pady=(4, 0))
 
-        self.detail = tk.StringVar(value="Select a plugin")
-        ttk.Label(left, textvariable=self.detail, wraplength=280).pack(
-            anchor=tk.W, pady=(8, 0)
+        ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(8, 4))
+        ttk.Label(left, text="Details").pack(anchor=tk.W)
+        self.detail_text = scrolledtext.ScrolledText(
+            left, height=10, wrap=tk.WORD, state=tk.DISABLED
         )
+        self.detail_text.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
 
         sim = ttk.LabelFrame(right, text="Simulate Telegram events", padding=8)
         sim.pack(fill=tk.X)
@@ -139,18 +180,33 @@ class HostApp:
 
         log_frame = ttk.LabelFrame(right, text="Toast / log output", padding=8)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        log_ctrl = ttk.Frame(log_frame)
+        log_ctrl.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(log_ctrl, text="Clear log", command=self._clear_log).pack(side=tk.LEFT)
         self.log = scrolledtext.ScrolledText(log_frame, height=18, wrap=tk.WORD)
         self.log.pack(fill=tk.BOTH, expand=True)
         self.log.configure(state=tk.DISABLED)
-
-        status = ttk.Frame(self.root, padding=(8, 0, 8, 8))
-        status.pack(fill=tk.X)
-        self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(status, textvariable=self.status_var).pack(side=tk.LEFT)
+        
+        # Log coloring
+        self.log.tag_configure("log_toast", foreground="#007acc")
+        self.log.tag_configure("log_err", foreground="#c00000")
+        self.log.tag_configure("log_warn", foreground="#a67c00")
+        self.log.tag_configure("log_system", foreground="#666666")
 
     def _append_log(self, line: str) -> None:
         self.log.configure(state=tk.NORMAL)
-        self.log.insert(tk.END, line + "\n")
+        
+        tag = None
+        if line.startswith("[toast]"):
+            tag = "log_toast"
+        elif "[error]" in line.lower() or "failed" in line.lower() or "exception" in line.lower():
+            tag = "log_err"
+        elif "[warning]" in line.lower() or "warn" in line.lower():
+            tag = "log_warn"
+        elif line.startswith("[loader]") or line.startswith("[system]"):
+            tag = "log_system"
+            
+        self.log.insert(tk.END, line + "\n", (tag,) if tag else ())
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
 
@@ -160,6 +216,11 @@ class HostApp:
 
     def _on_log(self, text: str) -> None:
         self._append_log(f"[log] {text}")
+
+    def _clear_log(self) -> None:
+        self.log.configure(state=tk.NORMAL)
+        self.log.delete("1.0", tk.END)
+        self.log.configure(state=tk.DISABLED)
 
     def browse_root(self) -> None:
         chosen = filedialog.askdirectory(initialdir=str(self.plugins_root))
@@ -194,17 +255,28 @@ class HostApp:
     def reload_plugins(self, load_enabled: bool = True) -> None:
         ayu_api.clear_hooks()
         root = Path(self.path_var.get().strip() or self.plugins_root)
-        self.plugins_root = root
-        self.loader = PluginLoader(root)
+        if root != self.plugins_root:
+            self.plugins_root = root
+            # Reuse the same loader instance so namespaces and fingerprints
+            # persist across reloads; only the root directory changes.
+            self.loader = PluginLoader(root)
         plugins = self.loader.scan()
-        self.listbox.delete(0, tk.END)
+        self._all_plugins = list(plugins)
         loaded = 0
         for p in plugins:
             mark = "ON" if p.enabled else "off"
+            tag = None
             if p.error:
                 mark = "ERR"
-            self.listbox.insert(tk.END, f"[{mark}] {p.name} - {p.id}")
-            if load_enabled and p.enabled and not p.error:
+                tag = "err"
+            elif p.enabled:
+                tag = "on"
+            else:
+                tag = "off"
+            # Listbox is rebuilt by _filter_plugins(); no insert needed here.
+            # Load only enabled, error-free, not-yet-loaded plugins.
+            # Unchanged plugins keep their loaded namespace and are skipped.
+            if load_enabled and p.enabled and not p.error and not p.loaded:
                 try:
                     self.loader.load_plugin_code(p)
                     loaded += 1
@@ -213,6 +285,7 @@ class HostApp:
                     p.enabled = False
                     self._append_log(f"Failed {p.id}: {e}")
                     self._append_log(traceback.format_exc())
+        self._filter_plugins()
         ayu_api.emit("on_app_start")
         self.status_var.set(
             f"{len(plugins)} plugins, {loaded} loaded from {self.plugins_root}"
@@ -235,98 +308,224 @@ class HostApp:
             except Exception as e:
                 messagebox.showerror("Settings", f"create_settings failed: {e}")
                 return
+
+        p = self.loader.plugins.get(pid)
+        title = f"Settings — {p.name}" if p else f"Settings — {pid}"
+
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry("520x480")
+        win.minsize(420, 300)
+        win.transient(self.root)
+        win.grab_set()
+
+        container = ttk.Frame(win, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            container, text=title,
+            font=("Segoe UI", 12, "bold")
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        canvas = tk.Canvas(container, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(
+            container, orient=tk.VERTICAL, command=canvas.yview)
+        settings_frame = ttk.Frame(canvas, padding=(0, 0, 10, 0))
+        settings_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=settings_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
+        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+
         editable = [r for r in rows
                     if hasattr(r, "key") and getattr(r, "key", "")]
         if not editable:
-            messagebox.showinfo(
-                "Settings", f"{pid} has no editable settings rows.")
-            return
-        win = tk.Toplevel(self.root)
-        win.title(f"Settings - {pid}")
-        win.geometry("420x360")
-        win.transient(self.root)
-        body = ttk.Frame(win, padding=10)
-        body.pack(fill=tk.BOTH, expand=True)
-        controls = {}
-        for row in editable:
-            kind = type(row).__name__
-            label = getattr(row, "text", "") or getattr(row, "key", "")
-            current = inst.get_setting(
-                getattr(row, "key"), getattr(row, "default", ""))
-            frm = ttk.Frame(body)
-            frm.pack(fill=tk.X, pady=3)
-            ttk.Label(frm, text=label).pack(anchor=tk.W)
-            if kind == "Switch":
-                var = tk.BooleanVar(value=bool(current))
-                ttk.Checkbutton(frm, variable=var).pack(anchor=tk.W)
-                controls[getattr(row, "key")] = lambda v=var: bool(v.get())
-            elif kind == "Selector":
-                items = list(getattr(row, "items", []) or ["0"])
-                try:
-                    idx = int(current)
-                except Exception:
-                    idx = 0
-                idx = max(0, min(len(items) - 1, idx))
-                var = tk.StringVar(value=items[idx])
-                ttk.Combobox(frm, textvariable=var, values=items,
-                             state="readonly").pack(fill=tk.X)
-                controls[getattr(row, "key")] = (
-                    lambda it=items, v=var: it.index(v.get()))
-            else:
-                var = tk.StringVar(value=str(current))
-                ttk.Entry(frm, textvariable=var).pack(fill=tk.X)
-                controls[getattr(row, "key")] = lambda v=var: v.get()
+            ttk.Label(
+                settings_frame,
+                text=f"{pid} has no editable settings.",
+                foreground="#666666").pack(anchor=tk.W, pady=20)
+        else:
+            controls = {}
+            for row in rows:
+                kind = type(row).__name__
+                key = getattr(row, "key", None)
+                label = getattr(row, "text", "") or getattr(row, "key", "")
+
+                if kind == "Header":
+                    ttk.Separator(
+                        settings_frame, orient=tk.HORIZONTAL
+                    ).pack(fill=tk.X, pady=(10, 4))
+                    ttk.Label(
+                        settings_frame, text=label,
+                        font=("Segoe UI", 10, "bold"),
+                        foreground="#007acc").pack(anchor=tk.W, pady=(0, 6))
+                    continue
+
+                if not key:
+                    continue
+
+                current = inst.get_setting(
+                    key, getattr(row, "default", "")) if inst else ""
+
+                frm = ttk.Frame(settings_frame)
+                frm.pack(fill=tk.X, pady=(0, 8))
+
+                ttk.Label(frm, text=label).pack(anchor=tk.W)
+
+                if kind == "Switch":
+                    var = tk.BooleanVar(value=bool(current))
+                    ttk.Checkbutton(frm, variable=var).pack(anchor=tk.W)
+                    controls[key] = lambda v=var: bool(v.get())
+                elif kind == "Selector":
+                    items = list(getattr(row, "items", []) or ["0"])
+                    try:
+                        idx = int(current)
+                    except Exception:
+                        idx = 0
+                    idx = max(0, min(len(items) - 1, idx))
+                    var = tk.StringVar(value=items[idx])
+                    ttk.Combobox(
+                        frm, textvariable=var, values=items,
+                        state="readonly").pack(fill=tk.X, pady=(2, 0))
+                    controls[key] = (
+                        lambda it=items, v=var: it.index(v.get()))
+                else:
+                    var = tk.StringVar(value=str(current))
+                    ttk.Entry(frm, textvariable=var).pack(
+                        fill=tk.X, pady=(2, 0))
+                    controls[key] = lambda v=var: v.get()
+
+        status_var = tk.StringVar(value="")
+        status_lbl = ttk.Label(
+            container, textvariable=status_var,
+            foreground="#007acc", font=("Segoe UI", 9))
+        status_lbl.pack(anchor=tk.W, pady=(8, 4))
+
+        btn_frame = ttk.Frame(container)
+        btn_frame.pack(fill=tk.X, pady=(6, 0))
 
         def _save() -> None:
+            if not controls:
+                return
             payload = {}
+            errors = []
             for key, getter in controls.items():
                 try:
                     payload[key] = getter()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    errors.append(f"{key}: {exc}")
+            if errors:
+                status_var.set("Save error: " + "; ".join(errors))
+                status_lbl.configure(foreground="#c00000")
+                return
+            if inst is None:
+                messagebox.showerror("Settings", "Plugin instance not loaded.")
+                return
             try:
                 inst.import_settings(payload)
-            except Exception:
-                pass
-            try:
-                self._settings_path(pid).write_text(
-                    json.dumps(payload, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-            except Exception as e:
-                messagebox.showerror("Settings", f"save failed: {e}")
+            except Exception as exc:
+                messagebox.showerror(
+                    "Settings", f"import_settings failed: {exc}")
                 return
+            status_var.set("Settings saved.")
+            status_lbl.configure(foreground="#008000")
             try:
                 ayu_api.toast("Settings saved")
             except Exception:
                 pass
+            win.after(600, win.destroy)
+
+        def _cancel() -> None:
             win.destroy()
 
-        ttk.Button(body, text="Save", command=_save).pack(pady=(10, 0))
+        ttk.Button(btn_frame, text="Cancel", command=_cancel).pack(
+            side=tk.RIGHT, padx=(6, 0))
+        save_btn = ttk.Button(
+            btn_frame, text="Save", command=_save)
+        save_btn.pack(side=tk.RIGHT)
+
+        win.bind("<Return>", lambda e: _save())
+        win.bind("<Escape>", lambda e: _cancel())
+        save_btn.focus_set()
+
+        def _on_destroy(_e=None):
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+        win.protocol("WM_DELETE_WINDOW", lambda: (_on_destroy(), win.destroy()))
 
     def _selected_id(self) -> str | None:
         sel = self.listbox.curselection()
         if not sel:
             return None
         idx = sel[0]
-        plugins = list(self.loader.plugins.values())
-        if idx >= len(plugins):
+        if idx >= len(self._filtered_plugins):
             return None
-        return plugins[idx].id
+        return self._filtered_plugins[idx].id
+
+    def _filter_plugins(self) -> None:
+        """Show only listbox items matching the search text."""
+        query = self.filter_var.get().strip().lower()
+        self.listbox.delete(0, tk.END)
+        self._filtered_plugins = []
+        for p in self._all_plugins:
+            haystack = f"{p.name} {p.id} {p.description or ''} {p.author or ''}".lower()
+            if query and query not in haystack:
+                continue
+            self._filtered_plugins.append(p)
+            symbol = "●" if p.enabled else "○"
+            mark = f"{symbol} ON" if p.enabled else f"{symbol} off"
+            tag = None
+            if p.error:
+                mark = "⚠ ERR"
+                tag = "err"
+            elif p.enabled:
+                tag = "on"
+            else:
+                tag = "off"
+            self.listbox.insert(tk.END, f"{mark:<7} {p.name} ({p.id})", (tag,))
 
     def _show_selected(self) -> None:
         pid = self._selected_id()
+        self.detail_text.configure(state=tk.NORMAL)
+        self.detail_text.delete("1.0", tk.END)
         if not pid:
-            self.detail.set("Select a plugin")
+            self.detail_text.insert(tk.END, "Select a plugin", "value")
+            self.detail_text.configure(state=tk.DISABLED)
             return
-        p = self.loader.plugins[pid]
-        self.detail.set(
-            f"{p.name} v{p.version}\n"
-            f"{p.author}\n"
-            f"{p.description}\n"
-            f"hooks: {', '.join(p.hooks) or '-'}\n"
-            f"error: {p.error or '-'}"
-        )
+        p = self.loader.plugins.get(pid)
+        if p is None:
+            self.detail_text.insert(tk.END, "Plugin not found", "err")
+            self.detail_text.configure(state=tk.DISABLED)
+            return
+
+        def insert_field(label: str, value: str, tag: str = "value"):
+            self.detail_text.insert(tk.END, f"{label:<12}", "label")
+            self.detail_text.insert(tk.END, f"{value}\n", tag)
+
+        insert_field("Name:", p.name)
+        insert_field("ID:", p.id)
+        insert_field("Version:", p.version)
+        insert_field("Author:", p.author or "-")
+        status_tag = "on" if p.enabled else "value"
+        insert_field("Enabled:", "yes" if p.enabled else "no", status_tag)
+        insert_field("Error:", p.error or "-", "err" if p.error else "value")
+        insert_field("Hooks:", ", ".join(p.hooks) or "-")
+        insert_field("Permissions:", ", ".join(p.permissions) or "-")
+        self.detail_text.insert(tk.END, "\nDescription:\n", "label")
+        self.detail_text.insert(tk.END, p.description or "-", "value")
+        
+        self.detail_text.configure(state=tk.DISABLED)
 
     def enable_selected(self) -> None:
         pid = self._selected_id()

@@ -27,30 +27,34 @@ def grant(*, net_hosts=(), storage=False, process=False):
 
 
 def _hook(event: str, args):
-    if event in ("socket.getaddrinfo", "socket.bind", "socket.connect"):
-        host = ""
-        if args:
-            first = args[0]
-            if isinstance(first, (tuple, list)) and first:
-                host = str(first[0])
-            else:
-                host = str(first)
-        if "*" not in _ALLOWED_NET_HOSTS and host not in _ALLOWED_NET_HOSTS:
-            raise PermissionError(f"ayu sandbox: net to {host!r} denied (need net.http permission)")
-    elif event == "open":
-        path = str(args[0]) if args else ""
-        if "tdata" in path.replace("\\", "/"):
-            raise PermissionError("ayu sandbox: access to tdata/ denied")
-        if not _ALLOW_STORAGE:
-            mode = str(args[1]) if len(args) > 1 else "r"
-            if any(c in mode for c in "wax+"):
-                raise PermissionError(
-                    "ayu sandbox: file write denied (need storage.write permission")
-    elif event in ("os.system", "os.exec", "os.spawn", "subprocess.Popen"):
-        if not _ALLOW_PROCESS:
-            raise PermissionError("ayu sandbox: subprocess denied (need process.spawn permission)")
-    elif event in ("ctypes.dlopen", "ctypes.dlfun"):
-        raise PermissionError("ayu sandbox: ctypes denied")
+    try:
+        if event in ("socket.getaddrinfo", "socket.bind", "socket.connect"):
+            host = ""
+            if args:
+                first = args[0]
+                if isinstance(first, (tuple, list)) and first:
+                    host = str(first[0])
+                else:
+                    host = str(first)
+            if "*" not in _ALLOWED_NET_HOSTS and host not in _ALLOWED_NET_HOSTS:
+                raise PermissionError(f"ayu sandbox: net to {host!r} denied (need net.http permission)")
+        elif event == "open":
+            path = str(args[0]) if args else ""
+            if "tdata" in path.replace("\\", "/"):
+                raise PermissionError("ayu sandbox: access to tdata/ denied")
+            if not _ALLOW_STORAGE:
+                mode = str(args[1]) if len(args) > 1 else "r"
+                if any(c in mode for c in "wax+"):
+                    raise PermissionError(
+                        "ayu sandbox: file write denied (need storage.write permission)")
+        elif event in ("os.system", "os.exec", "os.spawn", "subprocess.Popen"):
+            if not _ALLOW_PROCESS:
+                raise PermissionError("ayu sandbox: subprocess denied (need process.spawn permission)")
+        elif event in ("ctypes.dlopen", "ctypes.dlfun"):
+            raise PermissionError("ayu sandbox: ctypes denied")
+    except PermissionError as e:
+        print(f"AUDIT HOOK VIOLATION: {e}", file=sys.stderr)
+        raise
 
 
 def install():

@@ -16,8 +16,15 @@ from typing import Dict
 
 # Имя папки плагина -> почему перенос невозможен
 ANDROID_ONLY: Dict[str, str] = {
+	"md3_navbars_everywhere":
+		"вешается на Android-экраны (ChatAttachAlert, GlassTabView, "
+		"StarGiftPreviewSheet) и рисует через Canvas; на Desktop их нет",
 	"animtou":
 		"Android-only, отказывается грузиться сам",
+	"visual_editor":
+		"Рисует свой интерфейс целиком: Bitmap, Canvas, View, диалоги "
+		"и списки Android. Переносить тут нечего: на Desktop другой "
+		"инструментарий, и подменять тут нечем",
 }
 
 

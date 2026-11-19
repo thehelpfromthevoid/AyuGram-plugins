@@ -58,6 +58,7 @@ class _Filter(importlib.abc.MetaPathFinder):
         if need is None:
             return None
         if need not in _granted and need.split(".")[0] not in {g.split(".")[0] for g in _granted}:
+            print(f"SANDBOX IMPORT VIOLATION: import {name!r} needs permission {need!r}", file=sys.stderr)
             raise PermissionError(f"ayu sandbox: import {name!r} needs permission {need!r}")
         return None
 
