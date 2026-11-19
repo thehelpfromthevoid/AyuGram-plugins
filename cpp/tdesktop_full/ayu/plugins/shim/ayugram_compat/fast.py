@@ -212,6 +212,28 @@ def available() -> bool:
 	return _load() is not None
 
 
+def warm() -> bool:
+	"""Load the library now, while no sandbox audit hook exists yet.
+
+	The bridge installs `sandbox/audithook.py` in `ConfigureSandbox`, which
+	runs before a plugin's code and refuses `ctypes.dlopen` outright - with no
+	permission that can lift it. `ctypes.CDLL` raises exactly that event, and
+	`_load` below catches `(OSError, AttributeError)`, which `PermissionError`
+	is a subclass of, so the refusal was swallowed, remembered for the life of
+	the process, and every fast call silently ran its Python fallback.
+
+	The bridge imports this package during `InitPython`, before the sandbox
+	exists, so loading here is what keeps the native path alive. Measured under
+	the client's own `python314.dll`: refused when the sandbox is installed
+	first, and fully working when loaded first (sandbox_effect2.txt,
+	sandbox_effect3.txt). Idempotent, and never raises.
+	"""
+	try:
+		return _load() is not None
+	except Exception:
+		return False
+
+
 def load_error() -> str:
 	if _lib is None:
 		_load()
@@ -394,31 +416,105 @@ def _valid_id(plugin_id: str) -> bool:
 	return all(c.isascii() and (c.isalnum() or c in "_.-") for c in rest)
 
 
+def _wrap_i32(value: int) -> int:
+	"""`static_cast<int>` of a 64-bit integer: a truncating cast, so big values wrap.
+
+	nlohmann stores integers as int64/uint64 and `get<int>()` narrows with a
+	plain cast, so a value past 2**31-1 wraps as the machine does:
+	5000000000 -> 705032704, 2147483648 -> -2147483648. Verified by compiling
+	the real header; see canon_parse.txt.
+	"""
+	wrapped = value & 0xFFFFFFFF
+	return wrapped - 0x100000000 if wrapped >= 0x80000000 else wrapped
+
+
+def _float_to_c_int(value: float) -> int:
+	"""The double->int narrowing the client's MSVC x64 build performs.
+
+	`cvttsd2si` truncates toward zero and yields `0x80000000` (INT_MIN) when the
+	result does not fit in 32 bits, instead of saturating. So `1e10`, `1e300`
+	and `2147483648.0` all load as `-2147483648`, while `2147483647.5`
+	truncates to `2147483647` and is kept. Observed from the compiled header;
+	the C++ operation is formally undefined here, so this matches the shipped
+	compiler rather than the language standard.
+	"""
+	if value != value or value in (float("inf"), float("-inf")):
+		return -2147483648
+	truncated = int(value)  # Python int() truncates toward zero, as cvttsd2si does
+	if truncated < -2147483648 or truncated > 2147483647:
+		return -2147483648
+	return truncated
+
+
+def _number_as_c_int(raw: Any) -> int:
+	"""The int the C++ host keeps for a JSON number, by storage class.
+
+	nlohmann keeps a JSON integer literal as int64/uint64 when it fits and only
+	falls back to a double when it does not; Python's `json` gives an arbitrary
+	precision int for either. So an integer past the 64-bit range has to take
+	the *double* path here, or the two disagree on e.g. `1e31` written without a
+	decimal point. Which path is taken decides the narrowing: a truncating cast
+	that wraps, or the MSVC conversion that clamps to INT_MIN.
+	"""
+	if isinstance(raw, bool):
+		return int(raw)
+	if isinstance(raw, int):
+		if -(2**63) <= raw <= 2**64 - 1:
+			return _wrap_i32(raw)
+		return _float_to_c_int(float(raw))
+	return _float_to_c_int(float(raw))
+
+
+def _json_type_name(value: Any) -> str:
+	"""nlohmann's `type_name()` names, matching the C++ host's refusal text.
+
+	Observed from the real header: a document `7` throws "cannot use value()
+	with number" and `true` throws "... with boolean", so the plain `number`
+	spelling is the one to reproduce.
+	"""
+	if value is None:
+		return "null"
+	if isinstance(value, bool):
+		return "boolean"
+	if isinstance(value, (int, float)):
+		return "number"
+	if isinstance(value, str):
+		return "string"
+	if isinstance(value, list):
+		return "array"
+	if isinstance(value, dict):
+		return "object"
+	return type(value).__name__
+
+
 def _python_manifest_problems(document: str) -> list[str]:
-	"""Python mirror of `ManifestProblems` in `plugin_manifest.cpp`."""
-	try:
-		m = json.loads(document)
-	except Exception as exc:
-		return [str(exc)[:256]]
-	if not isinstance(m, dict):
-		return ["manifest must be a JSON object"]
+	"""Python mirror of `ManifestProblems` in `plugin_manifest.cpp`.
+
+	The host does not validate the document as written: `ParseManifestJson`
+	first builds the manifest, where every string field is taken only when it
+	*is* a string (else the default), fields are truncated (`name` 100,
+	`description` 8000, `author` 200, `version` 32), `api_version` is read with
+	nlohmann's `value()`/`get<int>()` which casts a number or a boolean, and
+	unknown hooks are dropped. `ManifestProblems` then inspects that *parsed*
+	manifest. Checking the raw document instead reported problems the client
+	never has - a 500-character name became "name must be 1..100 chars" here
+	while the client accepted it - so this mirrors the parse step too.
+	"""
+	parsed, error = _python_parse_manifest(document)
+	if parsed is None:
+		return error
 	out: list[str] = []
-	plugin_id = str(m.get("id") or "")
-	name = str(m.get("name") or "")
-	description = str(m.get("description") or "")
-	entry = str(m.get("entry", "main.py") or "")
-	try:
-		api_version = int(m.get("api_version", _PLUGIN_API_VERSION))
-	except Exception:
-		api_version = -1
+	plugin_id = parsed["id"]
 	if not _valid_id(plugin_id):
 		out.append("id does not match the app's pattern")
-	if not name or len(name) > 100:
+	if not parsed["name"] or len(parsed["name"]) > 100:
 		out.append("name must be 1..100 chars")
-	if len(description) > _MAX_DESCRIPTION:
+	if len(parsed["description"]) > _MAX_DESCRIPTION:
 		out.append(f"description longer than {_MAX_DESCRIPTION} chars")
+	entry = parsed["entry"]
 	if not entry or ".." in entry:
 		out.append("entry must be a plain file name")
+	api_version = parsed["api_version"]
 	if api_version <= 0:
 		out.append("api_version must be a positive number")
 	elif api_version > _PLUGIN_API_VERSION:
@@ -426,19 +522,86 @@ def _python_manifest_problems(document: str) -> list[str]:
 			f"api_version {api_version} is newer than the app's "
 			f"{_PLUGIN_API_VERSION}: the app will refuse it"
 		)
-	hooks = m.get("hooks") or []
-	if isinstance(hooks, list):
-		for hook in hooks:
-			if isinstance(hook, str) and hook not in _KNOWN_HOOKS:
-				out.append(f"unknown hook: {hook}")
-	platforms = m.get("platforms")
-	if platforms is None and m.get("desktop_only"):
-		platforms = ["desktop"]
-	if isinstance(platforms, list) and platforms:
-		lower = {str(p).lower() for p in platforms}
+	for hook in parsed["hooks"]:
+		if hook not in _KNOWN_HOOKS:
+			out.append(f"unknown hook: {hook}")
+	platforms = parsed["platforms"]
+	if platforms:
+		lower = {p.lower() for p in platforms}
 		if not lower & {"desktop", "windows", "macos", "linux", "all", "any"}:
-			out.append(f"built for {', '.join(str(p) for p in platforms)}, not this platform")
+			out.append(f"built for {', '.join(platforms)}, not this platform")
 	return out
+
+
+def _python_parse_manifest(document: str) -> "tuple[dict | None, list[str]]":
+	"""`ParseManifestJson`: the parsed manifest, or `(None, [error])`.
+
+	`_string_field` mirrors the C++ `getStr` lambda: a value that is not a
+	string is not coerced, it is replaced by the default. That is why
+	`{"name": 123}` yields an empty name - and therefore the name problem -
+	rather than the string "123", and why `"entry": null` falls back to
+	`main.py` instead of failing the entry check.
+	"""
+
+	def _string_field(key: str, default: str = "") -> str:
+		value = m.get(key)
+		return value if isinstance(value, str) else default
+
+	try:
+		m = json.loads(document)
+	except Exception as exc:
+		return None, [str(exc)[:256]]
+	if not isinstance(m, dict):
+		# `ParseManifestJson` reaches `j.value("api_version", 1)` even when every
+		# field took its default, and nlohmann's `value()` throws
+		# `type_error.306` for a document that is not an object. The host catches
+		# it and refuses the manifest, so the answer is this exception and not a
+		# bad-id problem. Verified by compiling the real header.
+		return None, [
+			f"[json.exception.type_error.306] cannot use value() with {_json_type_name(m)}"
+		]
+
+	api_version = _PLUGIN_API_VERSION
+	if "api_version" in m:
+		raw = m["api_version"]
+		if isinstance(raw, (bool, int, float)):
+			api_version = _number_as_c_int(raw)
+		else:
+			# nlohmann's get<int>() throws `type_error.302`; ParseManifestJson
+			# catches it and returns false with the exception text.
+			return None, [
+				f"[json.exception.type_error.302] type must be number, but is {_json_type_name(raw)}"
+			]
+
+	hooks: list[str] = []
+	if isinstance(m.get("hooks"), list):
+		hooks = [h for h in m["hooks"] if isinstance(h, str)]
+	platforms: list[str] = []
+	# The C++ condition is `j.contains("platforms") && j["platforms"].is_array()`:
+	# an *empty* array still takes this branch, so `desktop_only` is ignored when
+	# `platforms` is present as an array at all. A non-array `platforms` falls
+	# through to `j.value("desktop_only", false)`, which is get<bool>() and
+	# throws for a non-boolean.
+	if isinstance(m.get("platforms"), list):
+		platforms = [p for p in m["platforms"] if isinstance(p, str)]
+	elif "desktop_only" in m:
+		desktop_only = m["desktop_only"]
+		if isinstance(desktop_only, bool):
+			platforms = ["desktop"] if desktop_only else []
+		else:
+			return None, [
+				f"[json.exception.type_error.302] type must be boolean, but is {_json_type_name(desktop_only)}"
+			]
+
+	return {
+		"id": _string_field("id"),
+		"name": _string_field("name")[:100],
+		"description": _string_field("description")[:_MAX_DESCRIPTION],
+		"entry": _string_field("entry", "main.py"),
+		"api_version": api_version,
+		"hooks": hooks,
+		"platforms": platforms,
+	}, []
 
 
 def manifest_problems(document: str) -> list[str]:
@@ -533,6 +696,16 @@ def _python_sanitize(plugin_id: str) -> str:
 
 
 def fnv1a64(data: bytes) -> int:
+	"""FNV-1a over `data`; a `str` is hashed as its UTF-8 bytes.
+
+	`file_fingerprint` always passes bytes. Text is accepted because the native
+	binding is declared `c_char_p`: a `str` used to raise `ArgumentError` there
+	and `TypeError` in the loop below, so the same call failed differently
+	depending on whether the DLL had loaded. Defining the meaning is cheaper
+	than documenting that both are wrong.
+	"""
+	if isinstance(data, str):
+		data = data.encode("utf-8")
 	lib = _load()
 	if lib is None:
 		value = 0xCBF29CE484222325

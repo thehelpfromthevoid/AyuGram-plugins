@@ -256,8 +256,14 @@ pub unsafe extern "C" fn ayu_settings_read(
     })
 }
 
-/// Writes the settings object atomically. The JSON may be a bare object or a
-/// full `{ "id", "version", "settings" }` document.
+/// Writes the settings object atomically. The JSON is the settings map itself,
+/// not a `{ "id", "version", "settings" }` document.
+///
+/// The wrapper is deliberately *not* accepted. It is ambiguous with the map:
+/// a plugin whose own settings contain a key called `settings` would otherwise
+/// be read as a wrapper, and the file would be rewritten holding only that
+/// nested object - every sibling setting silently dropped. The caller passes
+/// what it wants stored, and this adds the envelope.
 ///
 /// # Safety
 /// All pointers must point to their byte lengths.
@@ -276,10 +282,12 @@ pub unsafe extern "C" fn ayu_settings_write(
         let text = borrowed_str(json, json_len, "settings json")?;
         let value: serde_json::Value =
             serde_json::from_str(text).map_err(|error| error.to_string())?;
+        // The caller hands over the settings map itself. Taking a nested
+        // `settings` object when one is present would read a plugin's own key
+        // of that name as an envelope and drop its siblings on the next save,
+        // which is a silent loss of every other setting.
         let object = value
-            .get("settings")
-            .and_then(serde_json::Value::as_object)
-            .or_else(|| value.as_object())
+            .as_object()
             .ok_or_else(|| "settings must be a JSON object".to_owned())?;
         let values = object
             .iter()
@@ -480,6 +488,70 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).expect("json");
         assert_eq!(value["enabled"], true);
         assert_eq!(value["name"], "x");
+    }
+
+    #[test]
+    fn settings_write_does_not_read_a_settings_key_as_an_envelope() {
+        // A plugin's own map may contain a key called `settings`. Treating it
+        // as the `{ id, version, settings }` envelope makes the writer store
+        // only that nested object: every sibling setting is lost, silently, on
+        // the first save after one is added.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = c(dir.path().to_str().unwrap());
+        let id = c("demo");
+        let payload = c(r#"{"settings":{"a":1},"b":2}"#);
+
+        let write = unsafe {
+            ayu_settings_write(
+                root.as_ptr(),
+                root.as_bytes().len(),
+                id.as_ptr(),
+                id.as_bytes().len(),
+                payload.as_ptr(),
+                payload.as_bytes().len(),
+            )
+        };
+        assert_eq!(write, 0, "write failed: {:?}", unsafe {
+            CStr::from_ptr(ayu_last_error())
+        });
+
+        let mut out_len = 0usize;
+        let mut out_status = -1i32;
+        let pointer = unsafe {
+            ayu_settings_read(
+                root.as_ptr(),
+                root.as_bytes().len(),
+                id.as_ptr(),
+                id.as_bytes().len(),
+                &mut out_len,
+                &mut out_status,
+            )
+        };
+        let text = unsafe { take(pointer, out_len) };
+        assert_eq!(out_status, 0);
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(value["b"], 2, "sibling setting was dropped: {text}");
+        assert_eq!(value["settings"]["a"], 1, "nested map lost: {text}");
+    }
+
+    #[test]
+    fn settings_write_rejects_a_non_object() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = c(dir.path().to_str().unwrap());
+        let id = c("demo");
+        let payload = c("[1,2,3]");
+        let write = unsafe {
+            ayu_settings_write(
+                root.as_ptr(),
+                root.as_bytes().len(),
+                id.as_ptr(),
+                id.as_bytes().len(),
+                payload.as_ptr(),
+                payload.as_bytes().len(),
+            )
+        };
+        assert_eq!(write, -1);
+        assert!(!dir.path().join("demo.settings.json").exists());
     }
 
     #[test]

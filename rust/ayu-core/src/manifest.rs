@@ -69,6 +69,40 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     }
 }
 
+/// nlohmann's `type_name()` names, so a refusal reads the same in both hosts.
+/// Verified against the real header: `7` throws "cannot use value() with
+/// number" and `true` throws "... with boolean".
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// The double→int narrowing the client's MSVC x64 build performs.
+///
+/// `cvttsd2si` truncates toward zero and, when the truncated value does not fit
+/// in 32 bits, yields `0x80000000` instead of saturating. So `1e10`, `1e300`
+/// and `2147483648.0` all load as `-2147483648`, while `2147483647.5`
+/// truncates to `2147483647` and is kept. Rust's own `as` saturates, which is
+/// why this exists. Observed from the compiled header (canon_parse.txt); the
+/// C++ operation is formally undefined for these inputs, so this matches the
+/// shipped compiler rather than the language standard.
+fn float_to_c_int(value: f64) -> i32 {
+    if !value.is_finite() {
+        return i32::MIN;
+    }
+    let truncated = value.trunc();
+    if truncated < i32::MIN as f64 || truncated > i32::MAX as f64 {
+        return i32::MIN;
+    }
+    truncated as i32
+}
+
 pub fn is_known_hook(name: &str) -> bool {
     HOOK_NAMES.contains(&name)
 }
@@ -168,11 +202,26 @@ pub fn parse_lenient(json: &str) -> Result<Manifest, String> {
 
 fn parse_inner(json: &str, drop_unknown_hooks: bool) -> Result<Manifest, String> {
     let value: Value = serde_json::from_str(json).map_err(|e| truncate_chars(&e.to_string(), 256))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| "manifest must be a JSON object".to_owned())?;
+    // `ParseManifestJson` calls `j.contains(key)` (false for a non-object) and
+    // then, unconditionally, `j.value("api_version", kPluginApiVersion)`.
+    // nlohmann's `value()` throws `type_error.306` when the document is not an
+    // object, and the host catches that and refuses the manifest. A document
+    // like `[]` is therefore *not* answered with a bad-id problem; it is
+    // answered with that exception, and the wording is reproduced here so both
+    // implementations say the same thing. Verified by compiling the real header
+    // (see `canon_notobject.txt`).
+    let object = value.as_object().ok_or_else(|| {
+        format!(
+            "[json.exception.type_error.306] cannot use value() with {}",
+            json_type_name(&value)
+        )
+    })?;
 
     let get_string = |key: &str| {
+        // `getStr` on the C++ side requires `is_string()`: a number, boolean or
+        // null is replaced by the default rather than coerced, so a manifest
+        // with `"name": 123` has an empty name and is refused for that, not for
+        // holding the string "123".
         object
             .get(key)
             .and_then(Value::as_str)
@@ -200,11 +249,39 @@ fn parse_inner(json: &str, drop_unknown_hooks: bool) -> Result<Manifest, String>
             .unwrap_or_default()
     };
 
+    // `api_version` is an `int` in the C++ manifest and nlohmann's
+    // `get<int>()` narrows rather than widening. The narrowing differs by which
+    // storage nlohmann picked for the JSON number, and all three behaviours
+    // below were observed from the compiled header (canon_parse.txt):
+    //   * an integer that fits int64/uint64 wraps with a truncating cast -
+    //     `5000000000` loads as `705032704`, `2147483648` as `-2147483648`;
+    //   * a double (a fractional literal, or an integer too large for uint64)
+    //     goes through the platform conversion, which on the MSVC x64 build the
+    //     client ships does *not* saturate - `1e10` and `1e300` both load as
+    //     INT_MIN. Rust's own `as` saturates, hence `float_to_c_int` below.
     let api_version = match object.get("api_version") {
-        None => PLUGIN_API_VERSION,
-        Some(value) => value.as_i64().ok_or_else(|| {
-            "api_version must be an integer".to_owned()
-        })?,
+        None => PLUGIN_API_VERSION as i32,
+        Some(Value::Number(number)) => {
+            if let Some(integer) = number.as_i64() {
+                integer as i32
+            } else if let Some(unsigned) = number.as_u64() {
+                unsigned as i32
+            } else if let Some(float) = number.as_f64() {
+                float_to_c_int(float)
+            } else {
+                return Err("api_version must be a number".to_owned());
+            }
+        }
+        // nlohmann's `get<int>()` casts a boolean; a string, null, array or
+        // object throws with `type_error.302`, which is the wording the host
+        // reports.
+        Some(Value::Bool(value)) => i32::from(*value),
+        Some(other) => {
+            return Err(format!(
+                "[json.exception.type_error.302] type must be number, but is {}",
+                json_type_name(other)
+            ))
+        }
     };
 
     let mut manifest = Manifest {
@@ -220,7 +297,7 @@ fn parse_inner(json: &str, drop_unknown_hooks: bool) -> Result<Manifest, String>
                 None => get_string("min_version"),
             }
         },
-        api_version,
+        api_version: i64::from(api_version),
         entry: optional_string("entry", "main.py"),
         hooks: {
             let hooks = string_array("hooks");
@@ -236,11 +313,31 @@ fn parse_inner(json: &str, drop_unknown_hooks: bool) -> Result<Manifest, String>
         platforms: Vec::new(),
     };
 
-    let platforms = string_array("platforms");
-    if platforms.is_empty() && object.get("desktop_only").and_then(Value::as_bool) == Some(true) {
-        manifest.platforms.push("desktop".to_owned());
+    // The condition is `platforms.is_array()`, not "platforms produced entries".
+    // `"platforms": []` is an array, so the `else` branch - and therefore
+    // `desktop_only` - is never reached, while `"platforms": "desktop"` is not
+    // an array and falls through to the boolean. And `desktop_only` is read
+    // with `value()`, i.e. `get<bool>()`, which *throws* `type_error.302` for a
+    // non-boolean; the host reports that refusal. Both behaviours are read off
+    // a compiled transcription of ParseManifestJson, not inferred.
+    if let Some(array) = object.get("platforms").and_then(Value::as_array) {
+        manifest.platforms = array
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
     } else {
-        manifest.platforms = platforms;
+        match object.get("desktop_only") {
+            None => {}
+            Some(Value::Bool(true)) => manifest.platforms.push("desktop".to_owned()),
+            Some(Value::Bool(false)) => {}
+            Some(other) => {
+                return Err(format!(
+                    "[json.exception.type_error.302] type must be boolean, but is {}",
+                    json_type_name(other)
+                ))
+            }
+        }
     }
 
     Ok(manifest)
@@ -346,6 +443,94 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_platforms_array_suppresses_desktop_only() {
+        // The C++ branch is `contains("platforms") && is_array()`, so an *empty*
+        // array still counts as present: the `else if (desktop_only)` is never
+        // reached. Treating "produced no entries" as "absent" would give this
+        // manifest `["desktop"]` where the client gives `[]`. Read off a
+        // compiled transcription of ParseManifestJson (canon_parse.txt).
+        let m = parse_lenient(r#"{"id":"abc","name":"N","platforms":[],"desktop_only":true}"#)
+            .expect("parses");
+        assert!(m.platforms.is_empty(), "{:?}", m.platforms);
+
+        // A non-array `platforms` is not present as an array, so it falls
+        // through and desktop_only does apply.
+        let m = parse_lenient(r#"{"id":"abc","name":"N","platforms":"desktop","desktop_only":true}"#)
+            .expect("parses");
+        assert_eq!(m.platforms, ["desktop"]);
+
+        // ...but the desktop_only read itself is `value(..., false)`, i.e.
+        // get<bool>(), which throws for a non-boolean. The client refuses it.
+        let error = parse_lenient(
+            r#"{"id":"abc","name":"N","platforms":"desktop","desktop_only":"yes"}"#,
+        )
+        .expect_err("must be refused");
+        assert!(
+            error.contains("type_error.302") && error.contains("boolean"),
+            "{error}"
+        );
+        for document in [
+            r#"{"id":"abc","name":"N","desktop_only":"yes"}"#,
+            r#"{"id":"abc","name":"N","desktop_only":1}"#,
+            r#"{"id":"abc","name":"N","desktop_only":null}"#,
+            r#"{"id":"abc","name":"N","desktop_only":[]}"#,
+        ] {
+            let error = parse_lenient(document).expect_err("must be refused");
+            assert!(
+                error.contains("type_error.302") && error.contains("boolean"),
+                "{document} -> {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn api_version_narrows_to_int_like_static_cast() {
+        // `apiVersion` is an `int` and nlohmann's `get<int>()` narrows with a
+        // plain cast, so out-of-range values wrap instead of being refused:
+        // 5000000000 -> 705032704, 2147483648 -> -2147483648, and
+        // -2147483649 -> 2147483647. Values observed from the real header.
+        for (document, expected) in [
+            (r#"{"id":"abc","name":"N","api_version":5000000000}"#, 705032704),
+            (r#"{"id":"abc","name":"N","api_version":2147483648}"#, -2147483648),
+            (r#"{"id":"abc","name":"N","api_version":-2147483649}"#, 2147483647),
+        ] {
+            let m = parse_lenient(document).expect("parses");
+            assert_eq!(m.api_version, expected, "{document}");
+        }
+    }
+
+    #[test]
+    fn api_version_double_clamps_to_int_min_out_of_range() {
+        // A fractional literal - or an integer too large for uint64 - is stored
+        // by nlohmann as a double, and the MSVC x64 conversion the client ships
+        // clamps to INT_MIN rather than saturating or wrapping: `1e10`, `1e300`
+        // and `2147483648.0` all load as -2147483648, and `2147483647.5`
+        // truncates to 2147483647. Rust's `as` would saturate to INT_MAX, so
+        // this is the case the two implementations used to disagree on (caught
+        // by triple_check.py, not by native-vs-python parity alone).
+        for (document, expected) in [
+            (r#"{"id":"abc","name":"N","api_version":1e10}"#, -2147483648),
+            (r#"{"id":"abc","name":"N","api_version":1e300}"#, -2147483648),
+            (r#"{"id":"abc","name":"N","api_version":-1e300}"#, -2147483648),
+            (r#"{"id":"abc","name":"N","api_version":2147483648.0}"#, -2147483648),
+            (r#"{"id":"abc","name":"N","api_version":2147483647.5}"#, 2147483647),
+            (r#"{"id":"abc","name":"N","api_version":-0.5}"#, 0),
+            (r#"{"id":"abc","name":"N","api_version":100.0}"#, 100),
+            (
+                r#"{"id":"abc","name":"N","api_version":18446744073709551616}"#,
+                -2147483648,
+            ),
+            (
+                r#"{"id":"abc","name":"N","api_version":10000000000000000000000000000000}"#,
+                -2147483648,
+            ),
+        ] {
+            let m = parse_lenient(document).expect("parses");
+            assert_eq!(m.api_version, expected, "{document}");
+        }
+    }
+
+    #[test]
     fn permission_wildcards() {
         let m = parse(VALID).expect("valid");
         assert!(has_permission(&m, "ui.toast"));
@@ -357,6 +542,116 @@ mod tests {
     #[test]
     fn malformed_json_is_an_error() {
         assert!(parse("{not json").is_err());
-        assert!(parse("[]").is_err());
+    }
+
+    #[test]
+    fn a_json_document_that_is_not_an_object_is_refused_by_value() {
+        // `ParseManifestJson` reaches `j.value("api_version", 1)` even for a
+        // document whose fields all take their defaults, and nlohmann's
+        // `value()` throws `type_error.306` when the document is not an object.
+        // That throw is what the host reports - verified by compiling the real
+        // header, not inferred - so the answer is a refusal, not a bad-id
+        // problem, and the wording matches nlohmann's.
+        for (document, kind) in [
+            ("[]", "array"),
+            ("\"a string\"", "string"),
+            ("null", "null"),
+            ("7", "number"),
+            ("true", "boolean"),
+        ] {
+            let error = parse_lenient(document).expect_err("must be refused");
+            assert!(
+                error.contains("type_error.306") && error.contains(kind),
+                "{document} -> {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn api_version_casts_numbers_and_booleans_like_nlohmann() {
+        // `j.value("api_version", 1)` runs through nlohmann's `get<int>()`,
+        // which casts number_float and boolean; only a string/null/array/object
+        // throws. Refusing `1.0` would reject a manifest the client accepts.
+        // The values below were observed by running the real header.
+        assert_eq!(
+            parse_lenient(r#"{"id":"abc","name":"N","api_version":1.5}"#)
+                .expect("parses")
+                .api_version,
+            1
+        );
+        assert_eq!(
+            parse_lenient(r#"{"id":"abc","name":"N","api_version":1.0}"#)
+                .expect("parses")
+                .api_version,
+            1
+        );
+        assert_eq!(
+            parse_lenient(r#"{"id":"abc","name":"N","api_version":1.9}"#)
+                .expect("parses")
+                .api_version,
+            1
+        );
+        assert_eq!(
+            parse_lenient(r#"{"id":"abc","name":"N","api_version":true}"#)
+                .expect("parses")
+                .api_version,
+            1
+        );
+        // false casts to 0 and then fails the positive check, not the type check
+        let m = parse_lenient(r#"{"id":"abc","name":"N","api_version":false}"#).expect("parses");
+        assert_eq!(m.api_version, 0);
+        assert!(problems(&m)
+            .iter()
+            .any(|p| p == "api_version must be a positive number"));
+
+        // A string, null, array or object is refused with nlohmann's own text.
+        for (document, kind) in [
+            (r#"{"id":"abc","name":"N","api_version":"1"}"#, "string"),
+            (r#"{"id":"abc","name":"N","api_version":null}"#, "null"),
+            (r#"{"id":"abc","name":"N","api_version":[1]}"#, "array"),
+            (r#"{"id":"abc","name":"N","api_version":{}}"#, "object"),
+        ] {
+            let error = parse_lenient(document).expect_err("must be refused");
+            assert!(
+                error.contains("type_error.302") && error.contains(kind),
+                "{document} -> {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn string_fields_of_the_wrong_type_take_the_default() {
+        // `getStr` requires `is_string()`; a number is not stringified.
+        let m = parse_lenient(r#"{"id":"abc","name":123}"#).expect("parses");
+        assert!(m.name.is_empty());
+        assert!(problems(&m).iter().any(|p| p == "name must be 1..100 chars"));
+
+        // ...so a null entry falls back to "main.py" instead of failing.
+        let m = parse_lenient(r#"{"id":"abc","name":"N","entry":null}"#).expect("parses");
+        assert_eq!(m.entry, "main.py");
+        assert!(problems(&m).is_empty());
+
+        // a non-string platform is dropped, not stringified into a bad one
+        let m = parse_lenient(r#"{"id":"abc","name":"N","platforms":[1]}"#).expect("parses");
+        assert!(m.platforms.is_empty());
+        assert!(problems(&m).is_empty());
+    }
+
+    #[test]
+    fn long_fields_are_truncated_before_the_length_check() {
+        // ParseManifestJson left()s name and description first, so an
+        // over-long field is never a problem - it is silently shortened.
+        let long_name = "n".repeat(500);
+        let m = parse_lenient(&format!(r#"{{"id":"abc","name":"{long_name}"}}"#)).expect("parses");
+        assert_eq!(m.name.chars().count(), MAX_NAME_LEN);
+        assert!(problems(&m).is_empty());
+
+        let long_text = "d".repeat(9000);
+        let m = parse_lenient(&format!(
+            r#"{{"id":"abc","name":"N","description":"{long_text}"}}"#
+        ))
+        .expect("parses");
+        assert_eq!(m.description.chars().count(), MAX_DESCRIPTION_LEN);
+        assert!(problems(&m).is_empty());
     }
 }

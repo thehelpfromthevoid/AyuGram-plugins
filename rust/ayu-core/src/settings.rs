@@ -65,6 +65,14 @@ impl SettingsStore {
     /// parsed, so the caller can log it the way the Python store does.
     pub fn read_reported(&self, plugin_id: &str) -> (BTreeMap<String, Value>, i32) {
         let path = self.path_for(plugin_id);
+        // The Python store starts with `path.is_file()`, and that is the
+        // contract: a missing path is an empty map and *not* an error, and
+        // neither is a path that exists but is not a regular file. Reading the
+        // directory case as a failure reported an error for a file the Python
+        // store opens without complaint.
+        if !path.is_file() {
+            return (BTreeMap::new(), 0);
+        }
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) => {
@@ -80,8 +88,16 @@ impl SettingsStore {
         let Ok(value) = serde_json::from_str::<Value>(text) else {
             return (BTreeMap::new(), 1);
         };
-        let object = match value.get("settings").and_then(Value::as_object) {
-            Some(inner) => inner,
+        let object = match value.get("settings") {
+            // A `settings` key that is present but not an object is a broken
+            // document, not a legacy top-level map. Falling through to the
+            // document would hand the plugin a map containing the document's
+            // own `settings` field, and the next save would write that nested
+            // map back - one bad file, then a permanently corrupted one.
+            Some(inner) => match inner.as_object() {
+                Some(inner) => inner,
+                None => return (BTreeMap::new(), 1),
+            },
             None => match value.as_object() {
                 Some(top) => top,
                 None => return (BTreeMap::new(), 1),
@@ -211,5 +227,39 @@ mod tests {
         let (settings, status) = store.read_reported("bom");
         assert_eq!(status, 0);
         assert_eq!(settings["a"], 1);
+    }
+
+    #[test]
+    fn settings_key_that_is_not_an_object_is_a_failure() {
+        // The Python store returns `({}, True)` here, and it gets first refusal
+        // in `settings_store._read_file` only when the native library is
+        // missing. If the native side answered `({"settings": null}, 0)`
+        // instead, the plugin would be handed a map holding the document's own
+        // field, and its next save would write `settings.settings` back.
+        let (_dir, store) = store();
+        for body in [
+            r#"{"settings": null}"#,
+            r#"{"settings": null, "other": 2}"#,
+            r#"{"settings": 5}"#,
+            r#"{"settings": []}"#,
+        ] {
+            fs::write(store.path_for("bad"), body).expect("write");
+            let (settings, status) = store.read_reported("bad");
+            assert!(settings.is_empty(), "{body} -> {settings:?}");
+            assert_eq!(status, 1, "{body} must report an error");
+        }
+    }
+
+    #[test]
+    fn a_directory_is_not_a_readable_settings_file() {
+        // `path.is_file()` fails for a directory, and the Python store treats
+        // that exactly like a missing file: no settings, no error. Mapping the
+        // OS error to status 1 reported a failure for a path Python opens
+        // without complaint.
+        let (_dir, store) = store();
+        fs::create_dir_all(store.path_for("adir")).expect("dir");
+        let (settings, status) = store.read_reported("adir");
+        assert!(settings.is_empty());
+        assert_eq!(status, 0);
     }
 }

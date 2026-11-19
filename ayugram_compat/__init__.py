@@ -32,6 +32,20 @@ try:
 except Exception:
 	pass
 
+# Load the native fast layer here, on the package's first import.
+#
+# This import happens inside the bridge's InitPython, before
+# ConfigureSandbox installs the audit hook that refuses `ctypes.dlopen`
+# outright. After that hook exists, `ctypes.CDLL` can no longer load anything,
+# so a lazy first call from `settings_store` would always fall back to Python
+# and the whole native layer would be dead weight in the running client.
+# Loading once, here, keeps it mapped for the session. Never raises.
+try:
+	from . import fast as _fast
+	_fast.warm()
+except Exception:
+	pass
+
 __all__ = ["base_plugin", "hook_utils", "client_utils", "file_utils",
 	"android_utils", "mobile_stubs", "android_only", "gaps"]
 __api_version__ = 2
