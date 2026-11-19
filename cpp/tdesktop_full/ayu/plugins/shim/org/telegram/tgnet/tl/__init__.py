@@ -1,20 +1,35 @@
 """Android TL namespace for Desktop.
 
 `from org.telegram.tgnet.tl import TL_account` is how mobile plugins reach the
-API. Those calls have no Desktop equivalent, so they are answered with
-placeholders that record the use. The plugin keeps running and its Desktop
-path keeps working; only the Android-only request does nothing.
+API. Most of those calls have no Desktop equivalent and are answered with
+placeholders that record the use, so the plugin keeps running and only the
+Android-only request does nothing.
+
+One class of call is different: a request a plugin *builds* and hands to
+`send_request` is not inert, because the Desktop bridge can perform some of
+them (account.updateProfile among them). For those the bridge needs to read the
+method off the request, and it reads it from the request's type name - so the
+request has to be an instance of a type actually named `TL_account.updateProfile`
+rather than an anonymous placeholder. `tl_request_type` builds exactly that.
 """
 
-from org._stubs import Placeholder, android_module, note_use, unused  # noqa: F401
+from org._stubs import (  # noqa: F401
+	Placeholder,
+	android_module,
+	note_use,
+	tl_request_type,
+	unused,
+)
 
 
 class _TLAccount:
-	"""Records the Android request a plugin tried to make."""
+	"""A namespace of Telegram account requests, named after each method."""
 
 	def __getattr__(self, name):
+		if name.startswith("_"):
+			raise AttributeError(name)
 		note_use(f"TL_account.{name}()")
-		return Placeholder(f"TL_account.{name}()")
+		return tl_request_type(f"TL_account.{name}")
 
 
 class _TLClass:
@@ -25,7 +40,7 @@ class _TLClass:
 		if name.startswith("_"):
 			raise AttributeError(name)
 		note_use(f"{self._label}.{name}")
-		return Placeholder(f"{self._label}.{name}")
+		return tl_request_type(f"{self._label}.{name}")
 
 
 def _tl(label: str):

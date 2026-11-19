@@ -178,6 +178,67 @@ class Placeholder:
 		return hash(self._path)
 
 
+# A Telegram request a plugin builds is not an Android stub: the bridge reads
+# the method off the request's *type name* and the fields off its attributes,
+# so a placeholder that answers every attribute with another placeholder is
+# unrecognisable - `type(request).__name__` comes back as "Placeholder" and the
+# bridge refuses the call it could have performed. This factory makes a type
+# literally named after the method, whose instances keep the fields they are
+# given.
+_TL_CACHE: dict[str, type] = {}
+
+
+def tl_request_type(full_name: str) -> type:
+	"""Build a request class whose type name is the Telegram method.
+
+	`type(TL_account.updateProfile()).__name__` is then exactly
+	"TL_account.updateProfile", which is what the bridge matches on, and
+	assigning `req.first_name = ...` keeps the value, which is what it sends.
+	Fields that were never set stay placeholders, so an untouched optional
+	field is not sent as junk.
+	"""
+	cached = _TL_CACHE.get(full_name)
+	if cached is not None:
+		return cached
+
+	def _init(self, *args, **kwargs):
+		Placeholder.__init__(self, full_name)
+		object.__setattr__(self, "_values", dict(kwargs))
+
+	def _getattr(self, name: str):
+		if name.startswith("__") and name.endswith("__"):
+			raise AttributeError(name)
+		values = object.__getattribute__(self, "_values")
+		if name in values:
+			return values[name]
+		# An unset field answers like any other unknown stub, so a plugin that
+		# chains onto it (`req.flags |= 1`) keeps working; the bridge skips it
+		# because it is not a str/int/float.
+		return Placeholder(f"{full_name}.{name}")
+
+	def _setattr(self, name: str, value) -> None:
+		if name in ("_path", "_log", "_values"):
+			object.__setattr__(self, name, value)
+			return
+		object.__getattribute__(self, "_values")[name] = value
+
+	def _repr(self) -> str:
+		return f"<{full_name} {object.__getattribute__(self, '_values')!r}>"
+
+	namespace = {
+		"__init__": _init,
+		"__getattr__": _getattr,
+		"__setattr__": _setattr,
+		"__repr__": _repr,
+		"__slots__": ("_values",),
+		"__module__": "org._stubs",
+		"__qualname__": full_name,
+	}
+	result = type(full_name, (Placeholder,), namespace)
+	_TL_CACHE[full_name] = result
+	return result
+
+
 def stub_type(path: str) -> type:
 	"""A class that can stand in for an Android class in any position.
 
