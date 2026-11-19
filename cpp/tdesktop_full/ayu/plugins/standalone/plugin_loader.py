@@ -158,6 +158,7 @@ class PluginLoader:
         self.plugins: dict[str, PluginInfo] = {}
         self._enabled: dict[str, bool] = {}
         self._namespaces: dict[str, dict] = {}
+        self._fingerprints: dict[str, tuple[int, int]] = {}
         self.plugins_root.mkdir(parents=True, exist_ok=True)
         self._watch_for_stalls()
 
@@ -343,16 +344,43 @@ class PluginLoader:
             raise ValueError(f"missing entry {info.entry}")
         return info
 
+    def _plugin_fingerprint(self, path: Path, is_dir: bool) -> tuple[int, int] | None:
+        """Return (mtime_ns, size) of the plugin's key file(s) for change detection.
+
+        For a directory plugin: the manifest (or entry script if no manifest).
+        For a single-file plugin: the file itself.
+        Returns None if the path cannot be stat'ed.
+        """
+        try:
+            if is_dir:
+                entry_path = None
+                for manifest_name in MANIFEST_NAMES:
+                    m = path / manifest_name
+                    if m.is_file():
+                        entry_path = m
+                        break
+                if entry_path is None:
+                    entry = self._entry_from_candidates(path)
+                    entry_path = entry if entry is not None else path
+            else:
+                entry_path = path
+            st = entry_path.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except Exception:
+            return None
+
     def scan(self) -> list[PluginInfo]:
         self.load_state()
-        self.plugins.clear()
+
+        # Discover on-disk plugins: pid -> (path, is_dir)
+        on_disk: dict[str, tuple[Path, bool]] = {}
         for child in sorted(self.plugins_root.iterdir()):
             if child.name.startswith("."):
                 continue
             if child.name == "__pycache__":
                 continue
             if child.is_file():
-                # Loose single files dropped into the folder are adopted once.
+                # Loose single files dropped into the folder.
                 if child.suffix.lower() in SINGLE_SUFFIXES:
                     try:
                         probe = read_legacy_metadata(
@@ -360,36 +388,63 @@ class PluginLoader:
                         pid = sanitize_id(probe["id"] or child.stem)
                     except Exception:
                         pid = sanitize_id(child.stem)
-                    if pid in self.plugins or pid in self._enabled:
+                    # If a directory with this pid already exists (from a prior
+                    # install_from_file), let the directory entry win.
+                    if pid in on_disk:
                         continue
-                    try:
-                        info = self.install_from_file(child, rescan=False)
-                        info.enabled = self._enabled.get(info.id, True)
-                        self.plugins[info.id] = info
-                    except Exception as e:
-                        bad = PluginInfo(
-                            id=sanitize_id(child.stem),
-                            name=child.name,
-                            enabled=False,
-                            error=str(e),
-                        )
-                        self.plugins[bad.id] = bad
+                    on_disk[pid] = (child, False)
                 continue
             if not child.is_dir():
                 continue
             try:
                 info = self.parse_manifest(child)
-                info.enabled = self._enabled.get(info.id, True)
-                self.plugins[info.id] = info
+                on_disk[info.id] = (child, True)
+            except Exception:
+                # Unparseable dir - track under its folder name so it can be
+                # reported as a bad plugin.
+                on_disk[child.name] = (child, True)
+
+        # Remove plugins that no longer exist on disk
+        for pid in list(self.plugins):
+            if pid not in on_disk:
+                del self.plugins[pid]
+                self._enabled.pop(pid, None)
+                self._namespaces.pop(pid, None)
+                self._fingerprints.pop(pid, None)
+
+        # Re-parse only new/changed plugins; keep cached PluginInfo for unchanged
+        for pid in sorted(on_disk):
+            path, is_dir = on_disk[pid]
+            fingerprint = self._plugin_fingerprint(path, is_dir)
+            cached = self.plugins.get(pid)
+
+            if cached is not None and fingerprint == self._fingerprints.get(pid):
+                # Unchanged - restore enabled state from persisted _enabled
+                cached.enabled = self._enabled.get(pid, cached.enabled)
+                continue
+
+            # Changed or new - clear stale namespace, re-parse
+            self._namespaces.pop(pid, None)
+            try:
+                if is_dir:
+                    info = self.parse_manifest(path)
+                    info.enabled = self._enabled.get(pid, info.enabled)
+                else:
+                    info = self.install_from_file(path, rescan=False)
+                    info.enabled = self._enabled.get(info.id, True)
+                self.plugins[pid] = info
+                self._fingerprints[pid] = fingerprint
             except Exception as e:
                 bad = PluginInfo(
-                    id=child.name,
-                    name=child.name,
-                    dir_path=child,
+                    id=pid,
+                    name=pid,
+                    dir_path=path if is_dir else None,
                     enabled=False,
                     error=str(e),
                 )
-                self.plugins[bad.id] = bad
+                self.plugins[pid] = bad
+                self._fingerprints[pid] = fingerprint
+
         self.save_state()
         return list(self.plugins.values())
 

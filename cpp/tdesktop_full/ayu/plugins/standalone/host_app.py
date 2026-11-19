@@ -123,16 +123,8 @@ class HostApp:
         self.listbox = tk.Listbox(left, exportselection=False)
         self.listbox.pack(fill=tk.BOTH, expand=True, pady=4)
         self.listbox.bind("<<ListboxSelect>>", lambda _e: self._show_selected())
-        # Color tags for status
-        self.listbox.tag_configure("on", foreground="#007acc")
-        self.listbox.tag_configure("off", foreground="#888888")
-        self.listbox.tag_configure("err", foreground="#c00000")
-        
-        # Color tags for detail panel
-        self.detail_text.tag_configure("label", font=("Segoe UI", 9, "bold"))
-        self.detail_text.tag_configure("value", font=("Segoe UI", 9))
-        self.detail_text.tag_configure("err", foreground="#c00000")
-        self.detail_text.tag_configure("on", foreground="#008000")
+        # Status colours are set per row with Listbox.itemconfig in
+        # _filter_plugins: Listbox has no tag_configure (that is Text/Canvas).
 
         btns = ttk.Frame(left)
         btns.pack(fill=tk.X)
@@ -152,6 +144,11 @@ class HostApp:
             left, height=10, wrap=tk.WORD, state=tk.DISABLED
         )
         self.detail_text.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        # Colour tags for the detail panel (Text widget supports tag_configure).
+        self.detail_text.tag_configure("label", font=("Segoe UI", 9, "bold"))
+        self.detail_text.tag_configure("value", font=("Segoe UI", 9))
+        self.detail_text.tag_configure("err", foreground="#c00000")
+        self.detail_text.tag_configure("on", foreground="#008000")
 
         sim = ttk.LabelFrame(right, text="Simulate Telegram events", padding=8)
         sim.pack(fill=tk.X)
@@ -485,15 +482,14 @@ class HostApp:
             self._filtered_plugins.append(p)
             symbol = "●" if p.enabled else "○"
             mark = f"{symbol} ON" if p.enabled else f"{symbol} off"
-            tag = None
+            color = "#007acc"  # enabled
             if p.error:
                 mark = "⚠ ERR"
-                tag = "err"
-            elif p.enabled:
-                tag = "on"
-            else:
-                tag = "off"
-            self.listbox.insert(tk.END, f"{mark:<7} {p.name} ({p.id})", (tag,))
+                color = "#c00000"
+            elif not p.enabled:
+                color = "#888888"
+            self.listbox.insert(tk.END, f"{mark:<7} {p.name} ({p.id})")
+            self.listbox.itemconfig(tk.END, foreground=color)
 
     def _show_selected(self) -> None:
         pid = self._selected_id()
