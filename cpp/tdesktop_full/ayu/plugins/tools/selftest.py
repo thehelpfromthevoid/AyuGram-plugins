@@ -351,6 +351,44 @@ def _queue_is_a_queue():
 	assert done == ["posted"], done
 
 
+@_check("shim", "the health line reads the containers it names")
+def _health_line_is_honest():
+	# `describe_sizes` is the one diagnostic meant to attribute memory growth to
+	# the plugins: "if one of these climbs while the app sits idle, the answer is
+	# the plugins". Two of its reads did not match the containers it named, so it
+	# reported a number that was silently wrong - the worst kind, because nobody
+	# looks again once a value is there.
+	#
+	#   * the queued work was read as `queue._queue`, but `_Queue` stores it in
+	#     `_pending`, so `queued=` was stuck at 0 however much work was waiting;
+	#   * `_shim_bytes` called `.values()` on `_timers` (a list) and
+	#     `_live_instances` (a WeakSet); neither has it, both were skipped by the
+	#     bare `except`, and the total covered the settings cache alone.
+	_reset_modules()
+	from ayugram_compat import client_utils, hook_utils, stall_watch
+
+	queue = client_utils._Queue()
+	for _ in range(200):
+		queue.post(lambda: None)
+	client_utils._queues["selftest-health"] = queue
+	hook_utils.add_timer(lambda: None, interval_s=3600, repeat=1, delay_s=3600)
+
+	reported = stall_watch.describe_sizes()
+	fields = dict(token.split("=", 1) for token in reported.split())
+	assert int(fields["queued"]) == 200, reported
+	# 200 queued callables are well over a kilobyte of list, so a total that
+	# skipped the list (and the timers beside it) cannot reach 1 KB.
+	assert int(fields["shim_kb"]) >= 1, reported
+
+	# And the reader agrees with every container shape it is handed, not just
+	# the dict it happened to be written for.
+	assert stall_watch._held_values({"a": 1}) == [1]
+	assert stall_watch._held_values([1, 2, 3]) == [1, 2, 3]
+	assert stall_watch._held_values(hook_utils._live_instances) == []
+	assert stall_watch._held_values(object()) is None
+	_reset_modules()
+
+
 @_check("shim", "a reply stays a reply instead of becoming a plain message")
 def _reply_is_carried():
 	# replyToMsg was read and then dropped on every path, so a plugin that

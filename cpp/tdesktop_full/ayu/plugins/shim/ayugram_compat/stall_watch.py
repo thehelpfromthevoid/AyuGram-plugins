@@ -120,7 +120,7 @@ def describe_sizes() -> str:
 		queues = len(client_utils._queues)
 		pending = 0
 		for queue in list(client_utils._queues.values()):
-			pending += len(getattr(queue, "_queue", ()) or ())
+			pending += len(getattr(queue, "_pending", ()) or ())
 	except Exception:
 		queues = pending = -1
 	try:
@@ -135,6 +135,24 @@ def describe_sizes() -> str:
 	return (f"timers={timers} instances={instances} queues={queues} "
 			f"queued={pending} settings={cached} "
 			f"shim_kb={held} rss_mb={rss}")
+
+
+def _held_values(group: Any) -> Optional[list]:
+	"""The items a shim container holds, whatever kind of container it is.
+
+	The three groups this walks are not all mappings: `_timers` is a list,
+	`_live_instances` is a WeakSet and only `_CACHE` is a dict. The old code
+	called `.values()` on each, which two of the three do not have - the
+	`except` then skipped them, and the line reported a total built from the
+	settings cache alone while claiming to cover the timers and the instances.
+	Answers None when the container cannot be read at all.
+	"""
+	try:
+		if isinstance(group, dict):
+			return list(group.values())
+		return list(group)
+	except Exception:
+		return None
 
 
 def _shim_bytes() -> int:
@@ -157,9 +175,8 @@ def _shim_bytes() -> int:
 		getattr(settings_store, "_CACHE", {}),
 	)
 	for group in groups:
-		try:
-			values = list(group.values())
-		except Exception:
+		values = _held_values(group)
+		if values is None:
 			continue
 		total += sys.getsizeof(group)
 		for value in values:
@@ -174,7 +191,7 @@ def _shim_bytes() -> int:
 	try:
 		for queue in list(client_utils._queues.values()):
 			total += sys.getsizeof(queue)
-			items = getattr(queue, "_queue", None)
+			items = getattr(queue, "_pending", None)
 			if items is not None:
 				total += sys.getsizeof(items)
 	except Exception:
