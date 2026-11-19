@@ -83,7 +83,7 @@ pub fn is_valid_id(id: &str) -> bool {
         return false;
     }
     let rest = chars.as_str();
-    if rest.len() < 1 || rest.len() > 63 {
+    if rest.is_empty() || rest.len() > 63 {
         return false;
     }
     rest.chars()
