@@ -369,6 +369,19 @@ class PluginLoader:
         except Exception:
             return None
 
+    @staticmethod
+    def _duplicate_rank(pid: str, path: Path, is_dir: bool) -> tuple:
+        """Rank a candidate when two entries claim one plugin id.
+
+        The directory named exactly after the id is canonical
+        (`<id>/plugin.json`); a directory beats a loose file; an entry that
+        carries a manifest beats a bare script tree. The last key is the path,
+        so the choice is stable and never depends on scan order.
+        """
+        has_manifest = is_dir and any((path / n).is_file()
+                                      for n in MANIFEST_NAMES)
+        return (path.name == pid, is_dir, has_manifest, str(path))
+
     def scan(self) -> list[PluginInfo]:
         self.load_state()
 
@@ -398,11 +411,24 @@ class PluginLoader:
                 continue
             try:
                 info = self.parse_manifest(child)
-                on_disk[info.id] = (child, True)
             except Exception:
                 # Unparseable dir - track under its folder name so it can be
                 # reported as a bad plugin.
                 on_disk[child.name] = (child, True)
+                continue
+            if info.id in on_disk:
+                # Two entries claim one id. Resolve it deliberately instead of
+                # letting sorted() order decide, so an Android reference copy
+                # cannot shadow the Desktop port sitting next to it.
+                prev_path, prev_is_dir = on_disk[info.id]
+                if self._duplicate_rank(info.id, prev_path, prev_is_dir) >= \
+                        self._duplicate_rank(info.id, child, True):
+                    _log(f"[loader] duplicate plugin id {info.id!r}: "
+                         f"{prev_path.name} wins over {child.name}")
+                    continue
+                _log(f"[loader] duplicate plugin id {info.id!r}: "
+                     f"{child.name} wins over {prev_path.name}")
+            on_disk[info.id] = (child, True)
 
         # Remove plugins that no longer exist on disk
         for pid in list(self.plugins):

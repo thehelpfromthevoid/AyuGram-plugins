@@ -2012,6 +2012,40 @@ def _deploy_ships_all_shim_packages():
 			"executable at startup")
 
 
+@_check("loader", "a duplicate plugin id resolves to the canonical directory")
+def _duplicate_id_wins():
+	# Two directories claiming one id used to be resolved by scan order: the
+	# later of sorted() overwrote the earlier. An Android reference copy named
+	# neural_typing_android_original sorted after the Desktop port neural_typing
+	# and silently shadowed it, so the port never loaded. The winner must be
+	# chosen deliberately (canonical <id> directory first), never by order.
+	_reset_modules()
+	from plugin_loader import PluginLoader
+
+	root = Path(tempfile.mkdtemp(prefix="ayu-selftest-dup-"))
+	plugins = root / "plugins"
+	plugins.mkdir()
+	try:
+		_write_plugin(plugins, "neural_typing", "__id__ = 'neural_typing'\n",
+			      {"version": "1.4.0-desktop"})
+		android = plugins / "neural_typing_android_original"
+		android.mkdir()
+		(android / "main.py").write_text(
+			"__id__ = 'neural_typing'\n__version__ = '1.3.7'\n",
+			encoding="utf-8")
+
+		found = {p.id: p for p in PluginLoader(plugins, root / "state.json").scan()}
+		assert "neural_typing" in found, sorted(found)
+		winner = found["neural_typing"]
+		assert winner.dir_path is not None, "winner has no directory"
+		assert winner.dir_path.name == "neural_typing", (
+			"the Android archive shadowed the Desktop port: "
+			+ winner.dir_path.name)
+		assert winner.version == "1.4.0-desktop", winner.version
+	finally:
+		shutil.rmtree(root, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- runner
 
 def main() -> int:
