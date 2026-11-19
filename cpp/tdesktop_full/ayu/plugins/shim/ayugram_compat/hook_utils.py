@@ -66,28 +66,8 @@ def _log(text: str) -> None:
 		print(f"[hook_utils] {text}")
 
 
-def _fast():
-	"""The native fast path, or None when it is unavailable.
-
-	Import and load are both guarded: a missing or older `ayu_fast.dll` must
-	leave every helper below working exactly as before, so a stale native
-	layer can only cost speed, never correctness.
-	"""
-	try:
-		from ayugram_compat import fast
-	except Exception:
-		return None
-	return fast
-
-
 def _desktop_hook_name(name: str) -> str:
 	raw = str(name or "")
-	fast = _fast()
-	if fast is not None:
-		try:
-			return fast.hook_name(raw)
-		except Exception:
-			pass
 	low = raw.lower().replace("-", "_")
 	aliases = {
 		"on_message": "on_message",
@@ -325,19 +305,6 @@ def pick_update_name(
 	"""
 	if not names:
 		return ""
-	fast = _fast()
-	if fast is not None:
-		try:
-			kind = -1
-			if event == "on_typing":
-				src = args[0] if args else None
-				try:
-					kind = int(getattr(src, "kind", -1))
-				except Exception:
-					kind = -1
-			return fast.pick_update_name(names, str(event or ""), kind)
-		except Exception:
-			pass
 	if event == "on_typing":
 		src = args[0] if args else None
 		try:
@@ -609,9 +576,10 @@ def command(prefix, fn=None, *, aliases=(), cancel=True):
 			raw = text.strip()
 			if not raw:
 				return
-			args = _fast_command_args(raw, prefixes)
-			if args is _NO_MATCH:
+			first = raw.split(None, 1)
+			if not first or first[0].lower() not in prefixes:
 				return
+			args = raw[len(first[0]):].strip().split() if len(first) > 1 else []
 			handler = f
 			instance = _resolve_instance(f)
 			if instance is not None:
@@ -638,33 +606,6 @@ def command(prefix, fn=None, *, aliases=(), cancel=True):
 	if fn is None:
 		return _register
 	return _register(fn)
-
-
-_NO_MATCH = object()
-
-
-def _fast_command_args(raw: str, prefixes: list):
-	"""Arguments of `raw` when it starts with a prefix, else `_NO_MATCH`.
-
-	Native first, and only for the inputs it answers for identically to
-	Python; everything else falls back to the split the rest of this function
-	used before, so a message that Python alone understands still behaves the
-	same.
-	"""
-	fast = _fast()
-	if fast is not None:
-		try:
-			parsed = fast.parse_command(raw, prefixes)
-			if parsed is not fast._DECLINED_COMMAND:
-				if parsed is None:
-					return _NO_MATCH
-				return parsed["args"]
-		except Exception:
-			pass
-	first = raw.split(None, 1)
-	if not first or first[0].lower() not in prefixes:
-		return _NO_MATCH
-	return raw[len(first[0]):].strip().split() if len(first) > 1 else []
 
 
 _timers: list = []
