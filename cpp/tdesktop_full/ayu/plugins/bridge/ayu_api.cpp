@@ -140,6 +140,15 @@ void PluginLog(const QString &pluginId, const QString &text) {
 
 std::unique_ptr<py::scoped_interpreter> g_guard;
 std::map<QString, py::object> g_modules;
+// Module globals a reload replaced, parked here instead of being released.
+//
+// The old globals of a hot-reloaded plugin must stay alive: its own threads and
+// timers may still hold the instance that lives in them, and releasing the dict
+// pulls the ground out from under them (the same access violation UnloadPlugin
+// avoids by leaving a module loaded). They are swept with everything else when
+// the interpreter is dropped, so the cost stays one module per reload - the
+// same lifetime a stale g_modules entry used to have, minus the staleness.
+std::vector<py::object> g_retiredModules;
 // Its own lock, and never g_mutex. The hook path takes g_mutex and then waits
 // for the GIL, so anything that holds the GIL and then wants g_mutex deadlocks
 // the whole app with no crash and no log line. LoadPlugin holds the GIL while
@@ -2271,6 +2280,7 @@ void ShutdownPython() {
 		{
 			const auto lock = std::lock_guard(g_modulesMutex);
 			g_modules.clear();
+			g_retiredModules.clear();
 		}
 	g_guard.reset();
 }
@@ -2321,9 +2331,23 @@ bool LoadPlugin(const PluginManifest &manifest, QString *error) {
 		}
 		{
 			const auto lock = std::lock_guard(g_modulesMutex);
-			g_modules.emplace(
-				manifest.id,
-				py::reinterpret_borrow<py::object>(globals));
+			const auto fresh = py::reinterpret_borrow<py::object>(globals);
+			const auto it = g_modules.find(manifest.id);
+			if (it == g_modules.end()) {
+				g_modules.emplace(manifest.id, fresh);
+			} else {
+				// A reload of the same id. emplace() used to be the only
+				// insertion, and on an existing key it does nothing - so after
+				// any hot reload g_modules still named the *previous* module.
+				// The settings schema, apply_settings and StopPluginInstance all
+				// read through this map, so they kept reaching the dead copy
+				// while the freshly executed one, with the plugin's real
+				// instance and hooks, was orphaned inside its own globals.
+				// Park the old globals instead of releasing them, and point the
+				// id at the module that just ran.
+				g_retiredModules.push_back(std::move(it->second));
+				it->second = fresh;
+			}
 		}
 		g_loadingPluginId.clear();
 		VerifyApiModule(manifest.id.toStdString().c_str());
