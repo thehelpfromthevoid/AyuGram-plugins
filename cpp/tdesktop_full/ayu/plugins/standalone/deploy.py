@@ -95,6 +95,11 @@ IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo",
 # three divergent copies of that tree happened in the first place.
 FAST_MODULE = "fast.py"
 FAST_DLL_NAMES = ("ayu_fast.dll", "libayu_fast.so", "libayu_fast.dylib")
+# The DPI helper is a separate executable, not a library: the client launches
+# `ayu-dpi.exe` from its own folder when the bypass is switched on. It is a
+# build artefact of the Rust workspace, so it is located and copied the same
+# way as the fast library rather than committed next to the sources.
+DPI_EXE_NAMES = ("ayu-dpi.exe", "ayu-dpi")
 # Bounded so the outward walk cannot reach a drive root on a deep checkout.
 SEARCH_DEPTH = 6
 
@@ -352,6 +357,51 @@ def find_native_library() -> Path | None:
 	return None
 
 
+def find_dpi_executable() -> Path | None:
+	"""The built `ayu-dpi.exe`, or None when nothing has been built.
+
+	Same outward walk as `find_native_library`, but the build artefact lives
+	directly in `rust/target/release` and is not mirrored into the shim: the
+	client loads it as a separate process from the app folder, so it is copied
+	to the target root, not into `ayugram_compat/native`.
+	"""
+	here = HERE
+	bases = [here]
+	parent = here
+	for _ in range(SEARCH_DEPTH):
+		parent = parent.parent
+		if parent == parent.parent:
+			break
+		bases.append(parent)
+
+	for base in bases:
+		for name in DPI_EXE_NAMES:
+			for candidate in (base / "rust" / "target" / "release" / name,
+							  base / name):
+				if candidate.is_file():
+					return candidate
+	return None
+
+
+def stage_dpi_executable(target: Path, blocked: list[str] | None = None) -> None:
+	"""Place the built DPI helper next to the executable that launches it.
+
+	Not being built is not an error: the bypass is off by default and the
+	client reports "ayu-dpi.exe not found next to the client" only after the
+	user switches it on, so this reports and returns rather than failing a
+	deploy that is otherwise complete.
+	"""
+	helper = find_dpi_executable()
+	if helper is None:
+		print("dpi      not staged (build rust/ with "
+			  "`cargo build --release -p ayu-dpi`)")
+		return
+
+	if copy_file(helper, target / helper.name, blocked):
+		print(f"dpi      {helper.name} ({helper.stat().st_size // 1024} KB)")
+
+
+
 def stage_fast_layer(target: Path, blocked: list[str] | None = None) -> None:
 	"""Place the built library next to the shim package that was just mirrored.
 
@@ -510,6 +560,13 @@ def deploy(build_dir: Path, target: Path, config: str,
 	print(f"shim     {len(SHIM_TOP_FILES)} files, {len(SHIM_PACKAGES)} packages")
 
 	stage_fast_layer(target, blocked)
+
+	# The DPI helper travels the same way as the fast library: it is a build
+	# artefact, so nothing commits it and nothing else in the pipeline copied
+	# it. Without this the app folder kept whatever copy a previous build had
+	# left in the build tree, and the shipped helper could be older than the
+	# client that launches it.
+	stage_dpi_executable(target, blocked)
 
 	# Without this the app starts with no permission enforcement: nothing
 	# checks what a plugin may import or write. Fail loudly rather than ship a
