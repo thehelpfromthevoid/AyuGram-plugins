@@ -413,12 +413,33 @@ def build_tl_update(name: str, event: str, args: tuple) -> PluginUpdate:
 		return PluginUpdate(raw, message=_message_like(message))
 
 	if event == "on_message_deleted":
-		peer_id = args[0] if args else 0
-		message_id = args[1] if len(args) > 1 else 0
+		# Desktop delivers one MessageDeletedContext carrying peer_id, msgIds
+		# and account - not the mobile (peerId, msgIds) pair this used to
+		# assume. Reading it positionally took the context object itself for
+		# the peer id and reported no message ids at all, so every raw-delete
+		# hook saw a garbage peer and messages=[0].
+		if args and (hasattr(args[0], "peer_id")
+				or hasattr(args[0], "msgIds")):
+			src = args[0]
+			peer_id = getattr(src, "peer_id", 0)
+			if peer_id is None:
+				peer_id = 0
+			ids = getattr(src, "msgIds", None)
+			if ids is None:
+				ids = getattr(src, "msg_ids", None)
+			if ids is None:
+				ids = ()
+			if not isinstance(ids, (list, tuple)):
+				ids = (ids,)
+			messages = [int(x or 0) for x in ids]
+		else:
+			peer_id = args[0] if args else 0
+			message_id = args[1] if len(args) > 1 else 0
+			messages = [int(message_id or 0)]
 		return PluginUpdate(
 			raw,
 			peer_id=peer_like(peer_id),
-			messages=[int(message_id or 0)],
+			messages=messages,
 			user_id=0,
 			action=None,
 		)
@@ -831,7 +852,7 @@ def timers_of(owner: Any) -> int:
 
 
 def release_instance(instance: Any) -> int:
-	"""Put a plugin's shim-side state away: its timers and its hooks.
+	"""Stop a switched-off plugin's own timers, and nothing else.
 
 	Called when a plugin is switched off. Without it a disabled plugin kept
 	every timer it had armed, because nothing on the way out touched the lists
@@ -841,13 +862,21 @@ def release_instance(instance: Any) -> int:
 	Only this plugin's own timers are stopped. Stopping all of them is what
 	this used to do, so switching one plugin off quietly ended every other
 	plugin's background work.
+
+	The instance stays in `_live_instances`. Switching a plugin off does not
+	unload it: the module is deliberately left resident and its subscriptions
+	are left in place, muted. Discarding the instance here took away the only
+	thing `_resolve_instance` binds a class-declared hook to, and switching the
+	plugin back on only clears the mute - it does not re-run main.py, so the
+	instance was never registered again. Every `@hook` written as a method then
+	raised `TypeError: missing 1 required positional argument: 'self'` on every
+	event, for good, with nothing in the UI to say why. No runtime path calls
+	`unregister_instance`, so a removed or reloaded plugin's instance lingers
+	here until the process ends. That is harmless: removing a plugin mutes it
+	first, so the stale instance is never invoked, and a hot reload builds a
+	fresh class object, so the old instance no longer matches any live hook.
 	"""
 	stopped = cancel_all_timers(instance)
-	try:
-		with _lock:
-			_live_instances.discard(instance)
-	except Exception:
-		pass
 	try:
 		from .gaps import note_gap
 		note_gap(f"released:{type(instance).__name__}")

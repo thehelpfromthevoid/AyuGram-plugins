@@ -33,6 +33,13 @@ bool isHidden(not_null<HistoryItem*> item) {
 	return isHidden(item->history()->peer->id, item->id);
 }
 
+void forget(PeerId peerId) {
+	// Без этого карта только пополнялась: каждое скрытое сообщение оставляло
+	// свой идентификатор до конца сессии, а диалоги в аккаунте приходят и
+	// уходят.
+	hiddenMessages.erase(peerId);
+}
+
 void setDisableGhostModeOnStoryClose(Main::Session *session) {
 	disableGhostModeOnStoryCloseSession = session;
 }

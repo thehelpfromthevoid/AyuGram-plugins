@@ -33,6 +33,8 @@ using namespace AyuBuilder;
 
 namespace {
 
+void BuildDpiBypass(SectionBuilder &builder, AyuSectionBuilder &ayu);
+
 void BuildTranslator(SectionBuilder &builder, AyuSectionBuilder &ayu) {
 	builder.addSubsectionTitle(tr::lng_translate_settings_subtitle());
 
@@ -308,6 +310,29 @@ void BuildQoLToggles(SectionBuilder &builder, AyuSectionBuilder &ayu) {
 		},
 		.toggledWhenAll = false,
 	});
+
+	BuildDpiBypass(builder, ayu);
+}
+
+void BuildDpiBypass(SectionBuilder &builder, AyuSectionBuilder &ayu) {
+	builder.addSubsectionTitle(rpl::single(QString("DPI")));
+
+	ayu.addSettingToggle({
+		.id = u"ayu/useDpiBypass"_q,
+		.title = tr::ayu_DpiBypass(),
+		.getter = &AyuSettings::useDpiBypass,
+		.setter = &AyuSettings::setUseDpiBypass,
+	});
+
+	ayu.addSettingToggle({
+		.id = u"ayu/dpiUseWebSocket"_q,
+		.title = tr::ayu_DpiBypassWebSocket(),
+		.getter = &AyuSettings::dpiUseWebSocket,
+		.setter = &AyuSettings::setDpiUseWebSocket,
+		.shown = AyuSettings::getInstance().useDpiBypassValue(),
+	});
+
+	builder.addDividerText(tr::ayu_DpiBypassDescription());
 }
 
 const auto kMeta = BuildHelper({

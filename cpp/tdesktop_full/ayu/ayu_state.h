@@ -20,6 +20,10 @@ void hide(not_null<HistoryItem*> item);
 bool isHidden(PeerId peerId, MsgId messageId);
 bool isHidden(not_null<HistoryItem*> item);
 
+// Забывает скрытые сообщения диалога. Нужно, когда диалог удаляют: держать
+// идентификаторы чата, которого больше нет, нечего.
+void forget(PeerId peerId);
+
 void setDisableGhostModeOnStoryClose(Main::Session *session);
 void disableGhostModeOnStoryClose(Main::Session *session);
 

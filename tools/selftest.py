@@ -380,6 +380,12 @@ def _health_line_is_honest():
 	# skipped the list (and the timers beside it) cannot reach 1 KB.
 	assert int(fields["shim_kb"]) >= 1, reported
 
+	# `py_blocks` is the discriminator the other two numbers cannot replace: a
+	# plugin object that never entered a known container leaves `shim_kb` flat
+	# and `rss_mb` rising, which reads the same as a Qt cache. It must be a real
+	# count here, not the -1 the reader answers when `sys` is unusable.
+	assert int(fields["py_blocks"]) > 0, reported
+
 	# And the reader agrees with every container shape it is handed, not just
 	# the dict it happened to be written for.
 	assert stall_watch._held_values({"a": 1}) == [1]
@@ -435,6 +441,147 @@ def _finished_timers_are_forgotten():
 	assert hook_utils.remove_timer(handle) is True
 	assert hook_utils._timers == []
 	_reset_modules()
+
+
+@_check("shim", "the watcher is reachable, single, and keeps its pen")
+def _watcher_starts_for_the_client():
+	# The watcher existed to explain a freeze and to attribute memory growth,
+	# and in the running client it did neither:
+	#
+	#   * `start()` was called from `plugin_loader.PluginLoader.__init__`, which
+	#     the bridge never runs - it loads each plugin through `LoadPlugin` plus
+	#     `activate_base_plugins` - so the thread was never started and no
+	#     `stall-watch.log` existed anywhere while `python_crash.log` did;
+	#   * even started, the sandbox it runs under refuses `ctypes.dlopen` and an
+	#     `open` for writing, so `_process_mb()` answered -1 and `dump()` wrote
+	#     nothing (measured: both PermissionError);
+	#   * and the freeze test itself was wrong: it called a frame that stopped
+	#     changing a stall, which is also what an idle event loop looks like. In
+	#     the live client that produced 135 "main thread stuck" blocks over an
+	#     hour while the window answered `WM_NULL` and the process used one
+	#     second of CPU in eight.
+	#
+	# The package import now warms the resources before the sandbox exists and
+	# starts the thread, `_in_bridge` keeps that to the application, and the
+	# stall is confirmed by asking the window rather than by reading a frame.
+	import tempfile
+	import threading
+	import time as _time
+
+	_reset_modules()
+	from ayugram_compat import stall_watch
+
+	# The start has to be reachable from where the bridge loads plugins, and the
+	# only proof of that is the call in the package's own import.
+	init_src = (SHIM / "ayugram_compat" / "__init__.py").read_text(
+		encoding="utf-8", errors="replace")
+	assert "_stall_watch.start()" in init_src, (
+		"the package no longer starts the watcher, and the bridge loads plugins "
+		"through LoadPlugin, not through plugin_loader.PluginLoader")
+	assert "_in_bridge()" in init_src, (
+		"the watcher would start in the CLI and in tests, where nothing is "
+		"watched")
+
+	# The frame test must not be the trigger on its own: a freeze is confirmed
+	# by the window. Without this the report fills with idle-time false alarms.
+	watch_src = (SHIM / "ayugram_compat" / "stall_watch.py").read_text(
+		encoding="utf-8", errors="replace")
+	assert "_ui_probe_reader()" in watch_src, (
+		"the stall is not confirmed by the window, so an idle main thread is "
+		"reported as stuck")
+	assert "_make_ui_probe" in watch_src, (
+		"the window probe is not built, so it cannot be captured before the "
+		"sandbox")
+
+	# The bridge marker is the boolean True, and a module that merely answers
+	# attribute lookups is not the bridge.
+	import types
+
+	plain = types.ModuleType("ayu_api")
+	sys.modules["ayu_api"] = plain
+	assert stall_watch._in_bridge() is False
+	marked = types.ModuleType("ayu_api")
+	marked.__ayu_stub__ = True
+	sys.modules["ayu_api"] = marked
+	assert stall_watch._in_bridge() is True
+
+	# Only the application may write into the profile. A tool run that happens
+	# to build a `PluginLoader` - `plugin_corpus` does, and so does the crash
+	# dump - calls `start()` too, and when the profile root was the fallback for
+	# everyone, such a run wrote its own thread stacks into the application's
+	# `stall-watch.log`. The report then described the tooling and looked like
+	# the client's, which is worse than no report.
+	sys.modules.pop("ayu_api", None)
+	previous_dir = os.environ.pop("AYU_PLUGINS_DIR", None)
+	try:
+		outside = stall_watch.log_path()
+		profile = Path(os.environ.get("APPDATA") or "~").expanduser()
+		profile = profile / "AyuGramDesktop" / "plugins"
+		assert outside.parent != profile, (
+			f"a non-bridge process writes its report into the live profile: "
+			f"{outside}")
+	finally:
+		if previous_dir is not None:
+			os.environ["AYU_PLUGINS_DIR"] = previous_dir
+		sys.modules["ayu_api"] = marked
+
+	# warm() captures the reader, the window probe and the handle, never raises,
+	# and is idempotent.
+	previous = os.environ.get("AYU_PLUGINS_DIR")
+	root = Path(tempfile.mkdtemp(prefix="ayu-selftest-watch-"))
+	os.environ["AYU_PLUGINS_DIR"] = str(root)
+	try:
+		assert isinstance(stall_watch.warm(), bool)
+		assert stall_watch.warm() is stall_watch.warm(), "warm is not idempotent"
+		assert stall_watch._process_mb() >= 0, (
+			"the captured reader did not read the process")
+
+		# The window probe was captured and can be called. It may answer None
+		# here: a console process is not guaranteed to own a visible top-level
+		# window - the console window belongs to the console host - and "no
+		# window" is the probe's honest third answer, not a failure.
+		assert stall_watch._ui_probe is not None, (
+			"the window probe was not captured before the sandbox")
+		answer = stall_watch._ui_probe_reader()
+		assert answer in (True, False, None), (
+			f"the window probe answered something unexpected: {answer!r}")
+
+		# dump writes through the captured handle, and the file it wrote is the
+		# one warm() chose.
+		written = stall_watch.dump("selftest marker", 0)
+		assert written is not None, "dump wrote nothing"
+		body = written.read_text(encoding="utf-8", errors="replace")
+		assert "selftest marker" in body, body[-300:]
+
+		# One watcher, and the second call is not a second thread.
+		assert stall_watch.start() is True, "start() did not start"
+		assert stall_watch.start() is False, "start() started a second thread"
+		_time.sleep(0.3)
+		named = [t for t in threading.enumerate()
+				 if t.name == "ayu-stall-watch"]
+		assert len(named) == 1, f"{len(named)} watchers running"
+
+		# A fresh module object (its own flag, saying "not started") must not
+		# start a second one: liveness is asked of threading by name.
+		for name in [n for n in list(sys.modules)
+					 if n == "ayugram_compat" or n.startswith("ayugram_compat.")]:
+			del sys.modules[name]
+		from ayugram_compat import stall_watch as fresh
+		assert fresh is not stall_watch, "the module was not re-imported"
+		assert fresh.start() is False, (
+			"a re-imported module started a second watcher")
+		_time.sleep(0.3)
+		named = [t for t in threading.enumerate()
+				 if t.name == "ayu-stall-watch"]
+		assert len(named) == 1, f"{len(named)} watchers after a re-import"
+	finally:
+		if previous is None:
+			os.environ.pop("AYU_PLUGINS_DIR", None)
+		else:
+			os.environ["AYU_PLUGINS_DIR"] = previous
+		shutil.rmtree(root, ignore_errors=True)
+		sys.modules.pop("ayu_api", None)
+		_reset_modules()
 
 
 @_check("shim", "a reply stays a reply instead of becoming a plain message")
@@ -1650,7 +1797,7 @@ def _console_tolerates_non_ascii():
 	original = sys.stdout
 	sys.stdout = stream
 	try:
-		print("[test] \u2705 Р С-РЎР‚Р С•Р Р†Р ВµРЎР‚Р С”Р В°")
+		print("[test] \u2705 Проверка")
 	finally:
 		sys.stdout = original
 	assert "\u2705" in stream.getvalue(), (

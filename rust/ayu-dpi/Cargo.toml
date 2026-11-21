@@ -1,0 +1,22 @@
+[package]
+name = "ayu-dpi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "ayu_dpi"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ayu-dpi"
+path = "src/main.rs"
+
+[dependencies]
+ayu-core = { path = "../ayu-core" }
+aes = "0.9"
+ctr = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+tempfile = "3"

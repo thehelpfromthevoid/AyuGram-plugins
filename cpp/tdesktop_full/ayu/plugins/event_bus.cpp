@@ -89,12 +89,18 @@ void EventBus::unsubscribe(int token) {
 }
 
 void EventBus::emitMessage(const PluginMessage &msg) {
-	// The interpreter lock covers the whole function, not just the
-	// calls: copying the callback list copies std::functions that hold
-	// py::objects, and every copy and destruction moves a Python
-	// reference count. Doing that without the GIL corrupts the
-	// interpreter - the fault showed a pointer full of 0xDD, the
-	// pattern an allocator leaves in freed memory.
+	// Fast path first: with no subscribers there is nothing to call and
+	// no reason to stop the interpreter. The emptiness check only reads
+	// the map under its own mutex and touches no py::object, so it needs
+	// no GIL. Everything past this point does: copying the callback list
+	// copies std::functions that hold py::objects, and every copy and
+	// destruction moves a Python reference count. Doing that without the
+	// GIL corrupts the interpreter - the fault showed a pointer full of
+	// 0xDD, the pattern an allocator leaves in freed memory.
+	{
+		const auto lock = std::lock_guard(_mutex);
+		if (_onMessage.empty()) return;
+	}
 	auto gil = py::gil_scoped_acquire();
 	auto copy = std::vector<MessageCallback>();
 	{
@@ -108,12 +114,18 @@ void EventBus::emitMessage(const PluginMessage &msg) {
 }
 
 bool EventBus::emitMessageSending(MessageSendingContext &ctx) {
-	// The interpreter lock covers the whole function, not just the
-	// calls: copying the callback list copies std::functions that hold
-	// py::objects, and every copy and destruction moves a Python
-	// reference count. Doing that without the GIL corrupts the
-	// interpreter - the fault showed a pointer full of 0xDD, the
-	// pattern an allocator leaves in freed memory.
+	// Fast path first: with no subscribers there is nothing to call and
+	// no reason to stop the interpreter. The emptiness check only reads
+	// the map under its own mutex and touches no py::object, so it needs
+	// no GIL. Everything past this point does: copying the callback list
+	// copies std::functions that hold py::objects, and every copy and
+	// destruction moves a Python reference count. Doing that without the
+	// GIL corrupts the interpreter - the fault showed a pointer full of
+	// 0xDD, the pattern an allocator leaves in freed memory.
+	{
+		const auto lock = std::lock_guard(_mutex);
+		if (_onSending.empty()) return true;
+	}
 	auto gil = py::gil_scoped_acquire();
 	auto copy = std::vector<MessageSendingCallback>();
 	{
@@ -131,12 +143,16 @@ bool EventBus::emitMessageSending(MessageSendingContext &ctx) {
 }
 
 void EventBus::emitDeleted(const MessageDeletedContext &ctx) {
-	// The interpreter lock covers the whole function, not just the
-	// calls: copying the callback list copies std::functions that hold
-	// py::objects, and every copy and destruction moves a Python
-	// reference count. Doing that without the GIL corrupts the
-	// interpreter - the fault showed a pointer full of 0xDD, the
-	// pattern an allocator leaves in freed memory.
+	// Fast path first: see emitMessage. The emptiness check reads the map
+	// under its own mutex and touches no py::object, so it needs no GIL.
+	{
+		const auto lock = std::lock_guard(_mutex);
+		if (_onDeleted.empty()) return;
+	}
+	// From here on the GIL is required: copying the callback list copies
+	// std::functions that hold py::objects, and every copy and destruction
+	// moves a Python reference count. Doing that without the GIL corrupts
+	// the interpreter.
 	auto gil = py::gil_scoped_acquire();
 	auto copy = std::vector<MessageDeletedCallback>();
 	{
@@ -149,12 +165,12 @@ void EventBus::emitDeleted(const MessageDeletedContext &ctx) {
 }
 
 void EventBus::emitChatOpened(const PluginChat &chat) {
-	// The interpreter lock covers the whole function, not just the
-	// calls: copying the callback list copies std::functions that hold
-	// py::objects, and every copy and destruction moves a Python
-	// reference count. Doing that without the GIL corrupts the
-	// interpreter - the fault showed a pointer full of 0xDD, the
-	// pattern an allocator leaves in freed memory.
+	// Fast path first: see emitMessage.
+	{
+		const auto lock = std::lock_guard(_mutex);
+		if (_onChat.empty()) return;
+	}
+	// From here on the GIL is required: see emitDeleted.
 	auto gil = py::gil_scoped_acquire();
 	auto copy = std::vector<ChatOpenedCallback>();
 	{
@@ -167,12 +183,12 @@ void EventBus::emitChatOpened(const PluginChat &chat) {
 }
 
 void EventBus::emitAppStart() {
-	// The interpreter lock covers the whole function, not just the
-	// calls: copying the callback list copies std::functions that hold
-	// py::objects, and every copy and destruction moves a Python
-	// reference count. Doing that without the GIL corrupts the
-	// interpreter - the fault showed a pointer full of 0xDD, the
-	// pattern an allocator leaves in freed memory.
+	// Fast path first: see emitMessage.
+	{
+		const auto lock = std::lock_guard(_mutex);
+		if (_onStart.empty()) return;
+	}
+	// From here on the GIL is required: see emitDeleted.
 	auto gil = py::gil_scoped_acquire();
 	auto copy = std::vector<SimpleCallback>();
 	{
@@ -185,12 +201,12 @@ void EventBus::emitAppStart() {
 }
 
 void EventBus::emitAppStop() {
-	// The interpreter lock covers the whole function, not just the
-	// calls: copying the callback list copies std::functions that hold
-	// py::objects, and every copy and destruction moves a Python
-	// reference count. Doing that without the GIL corrupts the
-	// interpreter - the fault showed a pointer full of 0xDD, the
-	// pattern an allocator leaves in freed memory.
+	// Fast path first: see emitMessage.
+	{
+		const auto lock = std::lock_guard(_mutex);
+		if (_onStop.empty()) return;
+	}
+	// From here on the GIL is required: see emitDeleted.
 	auto gil = py::gil_scoped_acquire();
 	auto copy = std::vector<SimpleCallback>();
 	{
@@ -203,12 +219,12 @@ void EventBus::emitAppStop() {
 }
 
 void EventBus::emitSettingChanged(const QString &key, const QString &value) {
-	// The interpreter lock covers the whole function, not just the
-	// calls: copying the callback list copies std::functions that hold
-	// py::objects, and every copy and destruction moves a Python
-	// reference count. Doing that without the GIL corrupts the
-	// interpreter - the fault showed a pointer full of 0xDD, the
-	// pattern an allocator leaves in freed memory.
+	// Fast path first: see emitMessage.
+	{
+		const auto lock = std::lock_guard(_mutex);
+		if (_onSetting.empty()) return;
+	}
+	// From here on the GIL is required: see emitDeleted.
 	auto gil = py::gil_scoped_acquire();
 	auto copy = std::vector<SettingChangedCallback>();
 	{
@@ -228,12 +244,12 @@ int EventBus::subscribeMediaSending(MediaSendingCallback cb) {
 }
 
 void EventBus::emitTyping(const PluginTyping &typing) {
-	// The interpreter lock covers the whole function, not just the
-	// calls: copying the callback list copies std::functions that hold
-	// py::objects, and every copy and destruction moves a Python
-	// reference count. Doing that without the GIL corrupts the
-	// interpreter - the fault showed a pointer full of 0xDD, the
-	// pattern an allocator leaves in freed memory.
+	// Fast path first: see emitMessage.
+	{
+		const auto lock = std::lock_guard(_mutex);
+		if (_onTyping.empty()) return;
+	}
+	// From here on the GIL is required: see emitDeleted.
 	auto gil = py::gil_scoped_acquire();
 	auto copy = std::vector<TypingCallback>();
 	{
@@ -246,9 +262,15 @@ void EventBus::emitTyping(const PluginTyping &typing) {
 }
 
 bool EventBus::emitMediaSending(MessageSendingContext &ctx) {
-	// The interpreter lock covers the whole function, for the same reason as
-	// every other emit here: the callback list holds py::objects and copying it
-	// moves Python reference counts.
+	// Fast path first: see emitMessage. Returning true here means "not
+	// cancelled", which is the correct answer when nobody subscribed.
+	{
+		const auto lock = std::lock_guard(_mutex);
+		if (_onMedia.empty()) return true;
+	}
+	// From here on the GIL is required, for the same reason as every other
+	// emit here: the callback list holds py::objects and copying it moves
+	// Python reference counts.
 	auto gil = py::gil_scoped_acquire();
 	auto copy = std::vector<MediaSendingCallback>();
 	{

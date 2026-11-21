@@ -31,6 +31,17 @@ namespace AyuForward {
 
 std::unordered_map<PeerId, std::shared_ptr<ForwardState>> forwardStates;
 
+// Запись заводилась на каждого получателя и не убиралась никогда. Помощник
+// оставлен, но без синхронизации он неверен: forwardStates заполняется с
+// worker-потока (ApiWrap::forwardMessages через crl::async, apiwrap.cpp:3836),
+// а читается с главного (isForwarding, stateName, cancelForward), и обход
+// карты здесь расширял бы существующую гонку на rehash. Снятие завершённых
+// записей возможно только вместе с мьютексом на всех читателях, поэтому
+// делается отдельной правкой, а не здесь.
+void StoreForwardState(const PeerId &peer, std::shared_ptr<ForwardState> state) {
+	forwardStates[peer] = std::move(state);
+}
+
 bool isForwarding(const PeerId &id) {
 	const auto fwState = forwardStates.find(id);
 	if (id.value && fwState != forwardStates.end()) {
@@ -295,7 +306,7 @@ void intelligentForward(
 	chunks.push_back(currentChunk);
 
 	auto state = std::make_shared<ForwardState>(chunks.size());
-	forwardStates[peer->id] = state;
+	StoreForwardState(peer->id, state);
 
 
 	for (const auto &chunk : chunks) {
@@ -337,12 +348,14 @@ void forwardMessages(
 	std::shared_ptr<ForwardState> state;
 
 	if (forwardState) {
-		state = std::make_shared<ForwardState>(*forwardStates[peer->id]);
+		const auto it = forwardStates.find(peer->id);
+		state = std::make_shared<ForwardState>(
+			(it != forwardStates.end() && it->second) ? *it->second : ForwardState(1));
 	} else {
 		state = std::make_shared<ForwardState>(1);
 	}
 
-	forwardStates[peer->id] = state;
+	StoreForwardState(peer->id, state);
 
 	std::unordered_map<uint64, uint64> groupIds;
 

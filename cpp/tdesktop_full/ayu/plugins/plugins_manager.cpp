@@ -49,7 +49,7 @@ constexpr BundledPluginSpec kBundledPlugins[] = {
 	{ "animtou", { "plugin.json", "main.py" }, false },
 };
 
-constexpr auto kBundledRev = "3";
+constexpr auto kBundledRev = "4";
 
 [[nodiscard]] bool CopyFileBytes(
 		const QString &from,
@@ -588,6 +588,10 @@ void Manager::ensureBundledPlugins() {
 	const auto sidecarRoot = QCoreApplication::applicationDirPath()
 		+ u"/plugins"_q;
 	auto anyNew = false;
+	// A copy that fails half way must not look done: the revision file below
+	// gates every future refresh, so writing it after a failed write would bury
+	// the update for good. The failure is logged and the run retried next start.
+	auto copyFailed = false;
 	for (const auto &spec : kBundledPlugins) {
 		const auto id = QString::fromUtf8(spec.id);
 		const auto dstDir = pluginsRoot() + u"/"_q + id;
@@ -610,20 +614,24 @@ void Manager::ensureBundledPlugins() {
 			}
 			continue;
 		}
-		if (exists && needRefresh) {
-			continue;
-		}
+		// No sidecar: the resource copy below overwrites the existing files
+		// too, so a revision bump actually refreshes a plugin that was seeded
+		// by an earlier build. Skipping it here would leave the old files in
+		// place and the new revision pointless.
 		auto ok = true;
 		for (const auto *file : spec.files) {
 			if (!file) continue;
 			const auto name = QString::fromUtf8(file);
 			const auto resource = u":/ayu/plugins/"_q + id + u"/"_q + name;
 			if (!QFile::exists(resource)) {
+				LOG(("AyuPlugins: bundled %1 has no resource %2")
+					.arg(id, resource));
 				ok = false;
 				break;
 			}
 			auto err = QString();
 			if (!CopyFileBytes(resource, dstDir + u"/"_q + name, &err)) {
+				LOG(("AyuPlugins: cannot seed %1: %2").arg(id, err));
 				ok = false;
 				break;
 			}
@@ -631,15 +639,20 @@ void Manager::ensureBundledPlugins() {
 		if (ok && !_enabled.count(id)) {
 			_enabled[id] = spec.enableByDefault;
 		}
+		if (!ok) {
+			copyFailed = true;
+		}
 	}
 	if (!alreadySeeded || anyNew || needRefresh) {
 		auto markerFile = QFile(marker);
 		if (markerFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
 			markerFile.write("1");
 		}
-		auto revFile = QFile(revPath);
-		if (revFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-			revFile.write(kBundledRev);
+		if (!copyFailed) {
+			auto revFile = QFile(revPath);
+			if (revFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+				revFile.write(kBundledRev);
+			}
 		}
 	}
 }

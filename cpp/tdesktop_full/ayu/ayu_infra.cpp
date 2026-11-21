@@ -77,6 +77,9 @@ void init() {
 	initRCManager();
 	initTranslator();
 	Ayu::Plugins::Host::instance().init();
+	// DPI-обход здесь не запускается: на этот момент настройки из хранилища
+	// ещё не прочитаны, и его настройка была бы дефолтной. Старт обхода -
+	// в Application::startSettingsAndBackground, уже после чтения настроек.
 }
 
 }

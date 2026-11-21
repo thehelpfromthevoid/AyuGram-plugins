@@ -472,6 +472,21 @@ def _reply_ids(kwargs: dict) -> tuple:
 	return top, root
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+	"""An id from whatever the plugin passed, or `default`.
+
+	A peer id that arrived as a dict, a list or a non-numeric string reached
+	`int()` outside any `try`, so the call raised `ValueError` or `TypeError`
+	out of `send_text`/`edit_message` and the plugin's handler died on that
+	line. An id nobody can read is not a valid target, so it answers `default`
+	and the caller reports "not sent" the ordinary way.
+	"""
+	try:
+		return int(value)
+	except Exception:
+		return default
+
+
 def send_text(
 		peer_id: Any,
 		text: str,
@@ -484,7 +499,7 @@ def send_text(
 	A plugin that cancels the original outgoing message must know whether
 	the replacement really arrived, otherwise the text is lost.
 	"""
-	peer = int(peer_id) if peer_id is not None else 0
+	peer = _as_int(peer_id) if peer_id is not None else 0
 	body = str(text or "")
 	if not peer or not body:
 		return False
@@ -536,8 +551,8 @@ def edit_message(
 	so a plugin that animates a message one step at a time stripped the link
 	preview out of it on the first edit - and had no way to tell that was why.
 	"""
-	peer = int(peer_id) if peer_id is not None else 0
-	ident = int(msg_id) if msg_id is not None else 0
+	peer = _as_int(peer_id) if peer_id is not None else 0
+	ident = _as_int(msg_id) if msg_id is not None else 0
 	body = str(text or "")
 	if not peer or not ident or not body:
 		return False
@@ -601,7 +616,7 @@ def _send_file(peer_id, path, caption, kind) -> bool:
 	and had no way to tell why. The native side reads the file off the calling
 	thread and uploads it through the ordinary send path.
 	"""
-	peer = int(peer_id) if peer_id is not None else 0
+	peer = _as_int(peer_id) if peer_id is not None else 0
 	if not peer:
 		_log(f"send_{kind}: no peer, nothing sent")
 		return False
@@ -746,10 +761,10 @@ class AccountClient:
 		self.account = int(account or 0)
 
 	def send_text(self, peer_id, text, **kwargs):
-		send_text(peer_id, text, account=self.account, **kwargs)
+		return send_text(peer_id, text, account=self.account, **kwargs)
 
 	def send_message(self, params, **kwargs):
-		send_message(params, account=self.account, **kwargs)
+		return send_message(params, account=self.account, **kwargs)
 
 	def get_user_config(self):
 		return _stub("user.config")

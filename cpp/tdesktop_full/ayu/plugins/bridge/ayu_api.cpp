@@ -179,12 +179,21 @@ std::atomic<bool> g_hookHoldsMainThread{false};
 // добавлении и удалении аккаунтов, и плагин, запомнивший "свой" номер, вдруг
 // начал бы писать в чужой диалог.
 std::map<int, int64_t> g_selfPeerIds;
+// Written on the main thread by RefreshSelfPeerIds, read from the UI thread
+// (SendCommandToSelf) and from a plugin thread under the GIL (self_peer_id).
+// No lock on either side meant a read could run while the map was being
+// replaced wholesale, which is a torn read of a std::map - not a wrong id but
+// a walk over nodes that are being freed. A lock of its own, for the same
+// reason as the error maps: it is taken while the GIL may be held, so it must
+// never be g_mutex, which the hook path holds while waiting for the GIL.
+std::mutex g_selfPeerIdsMutex;
 
 int64_t SelfPeerIdFor(int account) {
 	// -1 и любой отрицательный знак это «основной аккаунт». Так его понимает
 	// и Desktop (maybePrimarySession), и плагин, написанный до появления
 	// второго аккаунта: он зовёт self_peer_id() без аргумента и должен
 	// продолжать получать свой диалог, а не ноль.
+	const auto lock = std::lock_guard(g_selfPeerIdsMutex);
 	if (account < 0) {
 		if (g_selfPeerIds.empty()) {
 			return 0;
@@ -209,6 +218,7 @@ void RefreshSelfPeerIds() {
 			fresh[int(entry.index)] = int64_t(session->userPeerId().value);
 		}
 	}
+	const auto lock = std::lock_guard(g_selfPeerIdsMutex);
 	g_selfPeerIds = std::move(fresh);
 }
 
@@ -221,6 +231,13 @@ QString g_shimDir;
 thread_local QString g_loadingPluginId;
 std::map<QString, int> g_hookErrors;
 std::map<QString, QString> g_hookIssues;
+// g_hookErrors and g_hookIssues are written from inside hooks, which run with
+// the GIL held, and read from the UI thread. They cannot share g_mutex: the
+// hook path takes g_mutex and then waits for the GIL, so a writer that held the
+// GIL and then wanted g_mutex would invert against it and hang the app with no
+// crash and no log line. A lock of their own, held only around the map and
+// never across a wait for the GIL - the same reasoning as g_apiGapsMutex.
+std::mutex g_hookErrorsMutex;
 
 // Сколько раз сработал хук плагина и какие клиентские вызовы он делал.
 //
@@ -322,9 +339,18 @@ void NoteHookError(const QString &pluginId, const QString &detail) {
 		PluginLog(pluginId, u"hook error: "_q + detail);
 		return;
 	}
-	g_hookIssues[pluginId] = detail;
-	auto &count = g_hookErrors[pluginId];
-	++count;
+	// g_hookErrors and g_hookIssues are written from hooks, which run with the
+	// GIL held, and read from the UI thread. They therefore cannot share
+	// g_mutex: the hook path takes g_mutex and then waits for the GIL, so a
+	// writer that held the GIL and then wanted g_mutex would invert against it
+	// and hang the app. Same reasoning as g_apiGaps and g_activity: a lock of
+	// their own, held only around the map, never across a wait for the GIL.
+	auto count = 0;
+	{
+		const auto lock = std::lock_guard(g_hookErrorsMutex);
+		g_hookIssues[pluginId] = detail;
+		count = ++g_hookErrors[pluginId];
+	}
 	LOG(("AyuPlugins: hook error in %1 (%2): %3").arg(
 		pluginId,
 		QString::number(count),
@@ -349,6 +375,9 @@ void NoteHookError(const QString &pluginId, const QString &detail) {
 	if (pluginId.isEmpty()) {
 		return false;
 	}
+	// Locked like the other readers: NoteHookError writes g_hookErrors under
+	// g_hookErrorsMutex, and an unlocked find here would race with it.
+	const auto lock = std::lock_guard(g_hookErrorsMutex);
 	const auto it = g_hookErrors.find(pluginId);
 	return it != g_hookErrors.end() && it->second >= kMaxHookErrors;
 }
@@ -481,8 +510,13 @@ void SafeCallHookTraced(
 		pluginId,
 		hookName,
 		QString::number(elapsed.count())));
-	g_hookIssues[pluginId] = QString::fromUtf8(hookName)
-		+ u" took "_q + QString::number(elapsed.count()) + u"ms"_q;
+	{
+		// Same map as NoteHookError, same lock. This runs with the GIL held,
+		// which is exactly why it is g_hookErrorsMutex and not g_mutex.
+		const auto lock = std::lock_guard(g_hookErrorsMutex);
+		g_hookIssues[pluginId] = QString::fromUtf8(hookName)
+			+ u" took "_q + QString::number(elapsed.count()) + u"ms"_q;
+	}
 	PluginLog(pluginId,
 		u"slow hook: "_q + hookName + u" took "_q
 			+ QString::number(elapsed.count()) + u"ms"_q);
@@ -1815,11 +1849,11 @@ QStringList AuditRuntime() {
 			PyErr_Clear();
 			auto hint = detail;
 			if (name == u"ssl"_q || name == u"urllib.request"_q) {
-				hint += u" РІР‚вЂќ copy libssl-3.dll and libcrypto-3.dll next to AyuGram.exe";
+				hint += u" – copy libssl-3.dll and libcrypto-3.dll next to AyuGram.exe";
 			} else if (name == u"sqlite3"_q) {
-				hint += u" РІР‚вЂќ copy sqlite3.dll next to AyuGram.exe";
+				hint += u" – copy sqlite3.dll next to AyuGram.exe";
 			} else if (name == u"ctypes"_q) {
-				hint += u" РІР‚вЂќ copy libffi-8.dll next to AyuGram.exe";
+				hint += u" – copy libffi-8.dll next to AyuGram.exe";
 			}
 			g_runtimeProblems.append(name + u": "_q + hint);
 		} catch (...) {
@@ -2501,20 +2535,38 @@ void UnloadPlugin(const QString &id) {
 	// Turning a plugin off already does what matters: its subscriptions are
 	// released, so its hooks stop running. Keeping the module resident costs a
 	// few hundred kilobytes per plugin and removes this whole class of crash.
-	const auto lock = std::lock_guard(g_mutex);
-	g_hookErrors.erase(id);
-	g_hookIssues.erase(id);
+	{
+		// The error maps moved to their own lock (see NoteHookError), so the
+		// erase travels with them.
+		const auto lock = std::lock_guard(g_hookErrorsMutex);
+		g_hookErrors.erase(id);
+		g_hookIssues.erase(id);
+	}
+	{
+		// Имя владельца потока оставалось в карте навсегда: хук, отмеченный
+		// на потоке плагина, переживал и выключение плагина, и перезагрузку.
+		// Записи о самом выключенном плагине не нужны никому.
+		const auto guard = std::lock_guard(g_threadOwnerMutex);
+		const auto owner = id.toStdString();
+		for (auto it = g_threadOwner.begin(); it != g_threadOwner.end();) {
+			if (it->second == owner) {
+				it = g_threadOwner.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
 	LOG(("AyuPlugins: %1 left loaded, hooks released").arg(id));
 }
 
 int PluginHookErrors(const QString &id) {
-	const auto lock = std::lock_guard(g_mutex);
+	const auto lock = std::lock_guard(g_hookErrorsMutex);
 	const auto it = g_hookErrors.find(id);
 	return (it != g_hookErrors.end()) ? it->second : 0;
 }
 
 QString PluginLastHookIssue(const QString &id) {
-	const auto lock = std::lock_guard(g_mutex);
+	const auto lock = std::lock_guard(g_hookErrorsMutex);
 	const auto it = g_hookIssues.find(id);
 	return (it != g_hookIssues.end()) ? it->second : QString();
 }

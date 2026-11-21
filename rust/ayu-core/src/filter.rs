@@ -246,7 +246,9 @@ mod tests {
     fn matches_a_sequential_loop_over_small_inputs() {
         let needles = ["a", "b", "ab", "ba", "aa", "bb"];
         let replacements = ["", "a", "b", "ab", "ba"];
-        let texts = ["", "a", "b", "ab", "ba", "bab", "aab", "bba", "abab", "aaab"];
+        let texts = [
+            "", "a", "b", "ab", "ba", "bab", "aab", "bba", "abab", "aaab",
+        ];
         let mut checked = 0u32;
         for r1 in replacements {
             for r2 in replacements {

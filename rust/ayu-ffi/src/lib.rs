@@ -18,6 +18,7 @@ use std::ptr;
 use std::slice;
 use std::str;
 
+use ayu_core::dpi::{options::parse_line, plan, Desync, Resources, SplitPos, TransportKind};
 use ayu_core::filter::WordFilter;
 use ayu_core::hash;
 use ayu_core::manifest;
@@ -73,6 +74,20 @@ unsafe fn borrowed_str<'a>(
 
 unsafe fn borrowed_path(pointer: *const c_char, len: usize, what: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(borrowed_str(pointer, len, what)?))
+}
+
+unsafe fn borrowed_bytes<'a>(
+    pointer: *const c_char,
+    len: usize,
+    what: &str,
+) -> Result<&'a [u8], String> {
+    if pointer.is_null() {
+        return Err(format!("{what} is null"));
+    }
+    if len == 0 {
+        return Ok(&[]);
+    }
+    Ok(slice::from_raw_parts(pointer as *const u8, len))
 }
 
 /// Compiled word replacement set.
@@ -193,8 +208,7 @@ pub unsafe extern "C" fn ayu_manifest_problems(
             Ok(parsed) => manifest::problems(&parsed),
             Err(error) => vec![error],
         };
-        let encoded =
-            serde_json::to_string(&problems).map_err(|error| error.to_string())?;
+        let encoded = serde_json::to_string(&problems).map_err(|error| error.to_string())?;
         if !out_len.is_null() {
             *out_len = encoded.len();
         }
@@ -207,10 +221,7 @@ pub unsafe extern "C" fn ayu_manifest_problems(
 /// # Safety
 /// `json` must point to `json_len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn ayu_manifest_is_valid(
-    json: *const c_char,
-    json_len: usize,
-) -> c_int {
+pub unsafe extern "C" fn ayu_manifest_is_valid(json: *const c_char, json_len: usize) -> c_int {
     guard(0, || {
         let text = borrowed_str(json, json_len, "manifest json")?;
         Ok(c_int::from(manifest::parse(text).is_ok()))
@@ -247,8 +258,7 @@ pub unsafe extern "C" fn ayu_settings_read(
         if !out_status.is_null() {
             *out_status = status;
         }
-        let encoded =
-            serde_json::to_string(&values).map_err(|error| error.to_string())?;
+        let encoded = serde_json::to_string(&values).map_err(|error| error.to_string())?;
         if !out_len.is_null() {
             *out_len = encoded.len();
         }
@@ -388,6 +398,295 @@ pub extern "C" fn ayu_last_error() -> *const c_char {
     })
 }
 
+// ---------------------------------------------------------------------------
+// DPI desync (zapret) exports.
+//
+// These expose the transport-free strategy engine to the C++ client and the
+// Python host, so both can ask which rule applies to a destination, what a rule
+// cannot do on a given transport, and how a payload is cut up - without linking
+// `ayu-dpi` (which owns sockets and the WinDivert driver).
+
+/// Parses a zapret line and resolves its `--hostlist`/`--ipset` files against
+/// the current directory, so a rule gated on a list file is matched by the file
+/// contents rather than being dead. A file that cannot be read leaves its rule
+/// non-matching instead of matching every host.
+fn parse_dpi_config(text: &str) -> ayu_core::dpi::options::Config {
+    let mut config = parse_line(text);
+    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    config.resolve_lists(&base);
+    config
+}
+
+/// Parses a zapret `winws.exe`-style command line and returns how many rules it
+/// produced, or -1 on error. `capture_tcp`/`capture_udp` receive the global
+/// filter's port ranges as `"lo-hi,lo,lo-hi"` text so the caller need not parse
+/// the structure; pass NULL to ignore either.
+///
+/// # Safety
+/// `line` must point to `line_len` bytes; the output pointers may be null.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_dpi_parse(
+    line: *const c_char,
+    line_len: usize,
+    capture_tcp: *mut c_char,
+    capture_tcp_len: usize,
+    capture_tcp_out: *mut usize,
+    capture_udp: *mut c_char,
+    capture_udp_len: usize,
+    capture_udp_out: *mut usize,
+) -> c_int {
+    guard(-1, || {
+        if !capture_tcp_out.is_null() {
+            *capture_tcp_out = 0;
+        }
+        if !capture_udp_out.is_null() {
+            *capture_udp_out = 0;
+        }
+        let text = borrowed_str(line, line_len, "config line")?;
+        let config = parse_dpi_config(text);
+        write_capture(
+            config.capture.tcp.iter(),
+            capture_tcp,
+            capture_tcp_len,
+            capture_tcp_out,
+        );
+        write_capture(
+            config.capture.udp.iter(),
+            capture_udp,
+            capture_udp_len,
+            capture_udp_out,
+        );
+        Ok(config.rules.len() as c_int)
+    })
+}
+
+/// Writes a port list as `"lo-hi,lo"` into a caller buffer; silently truncates
+/// if the buffer is too small, always reporting the untruncated length.
+unsafe fn write_capture<'a>(
+    ranges: impl Iterator<Item = &'a ayu_core::dpi::options::PortRange>,
+    buffer: *mut c_char,
+    capacity: usize,
+    out_len: *mut usize,
+) {
+    let text = ranges
+        .map(|r| {
+            if r.lo == r.hi {
+                r.lo.to_string()
+            } else {
+                format!("{}-{}", r.lo, r.hi)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let bytes = text.as_bytes();
+    if !out_len.is_null() {
+        *out_len = bytes.len();
+    }
+    if buffer.is_null() || capacity == 0 {
+        return;
+    }
+    let n = bytes.len().min(capacity);
+    ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, n);
+}
+
+/// Returns the rules of `line` as a JSON array, each entry describing its match
+/// ports, host patterns and strategy, plus `unsupported` - the reasons the
+/// strategy cannot run in full on the transport named by `transport`
+/// (`0` = userspace SOCKS5, `1` = WinDivert). `[]` for an empty line.
+///
+/// # Safety
+/// `line` must point to `line_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_dpi_report(
+    line: *const c_char,
+    line_len: usize,
+    transport: c_int,
+    out_len: *mut usize,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        let text = borrowed_str(line, line_len, "config line")?;
+        let kind = if transport == 1 {
+            TransportKind::WinDivert
+        } else {
+            TransportKind::Userspace
+        };
+        let config = parse_dpi_config(text);
+        let rules: Vec<serde_json::Value> = config
+            .rules
+            .iter()
+            .map(|rule| {
+                let unsupported: Vec<&str> = rule.strategy.unsupported(kind);
+                serde_json::json!({
+                    "tcp": ports_to_json(&rule.filter.tcp),
+                    "udp": ports_to_json(&rule.filter.udp),
+                    "portsMalformed": rule.filter.ports_malformed,
+                    "hosts": rule.filter.hostlist_domains,
+                    "ipsets": rule.filter.ipset,
+                    "l7": rule.filter.l7,
+                    "desyncs": rule.strategy.desyncs.iter().map(desync_name).collect::<Vec<_>>(),
+                    "splitPositions": rule.strategy.split_positions.iter().map(split_pos_name).collect::<Vec<_>>(),
+                    "seqovl": rule.strategy.split_seqovl,
+                    "repeats": rule.strategy.repeats,
+                    "badseq": rule.strategy.fooling_badseq,
+                    "badseqIncrement": rule.strategy.badseq_increment,
+                    "anyProtocol": rule.strategy.any_protocol,
+                    "unsupported": unsupported,
+                    "unknown": rule.unknown,
+                })
+            })
+            .collect();
+        let encoded = serde_json::to_string(&rules).map_err(|error| error.to_string())?;
+        if !out_len.is_null() {
+            *out_len = encoded.len();
+        }
+        Ok(into_buffer(encoded).0)
+    })
+}
+
+fn ports_to_json(list: &[ayu_core::dpi::options::PortRange]) -> Vec<serde_json::Value> {
+    list.iter()
+        .map(|r| serde_json::json!([r.lo, r.hi]))
+        .collect()
+}
+
+fn desync_name(d: &Desync) -> &'static str {
+    match d {
+        Desync::None => "none",
+        Desync::Fake => "fake",
+        Desync::Multisplit => "multisplit",
+        Desync::Multidisorder => "multidisorder",
+        Desync::Syndata => "syndata",
+        Desync::FakedSplit => "fakedsplit",
+        Desync::HostFakeSplit => "hostfakesplit",
+    }
+}
+
+fn split_pos_name(p: &SplitPos) -> String {
+    match p {
+        SplitPos::Absolute(n) => n.to_string(),
+        SplitPos::MidSld => "midsld".to_owned(),
+        SplitPos::HostEnd => "host".to_owned(),
+        SplitPos::HostOffset(d) if *d >= 0 => format!("host+{d}"),
+        SplitPos::HostOffset(d) => format!("host{d}"),
+    }
+}
+
+/// Plans the segments for one outbound `payload` at `stream_pos`, returning a
+/// JSON array of segments, each `{"data":"<hex>","seq":<u32|null>,"fake":<bool>}`.
+/// Concatenating the non-fake `data` in order reproduces the payload; a `seq`
+/// that is set means "send with this absolute TCP sequence number" (badseq),
+/// and `fake` marks bytes the peer is expected to discard.
+///
+/// The FFI call has no loaded template blobs, so a plan that needs a fake
+/// template still returns the split structure with the fake omitted.
+///
+/// A userspace caller should check `unsupported` first and prefer
+/// [`ayu_dpi_userspace_chunks`], which honours only what a byte stream can do.
+///
+/// # Safety
+/// All pointers must point to their stated lengths.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_dpi_plan(
+    line: *const c_char,
+    line_len: usize,
+    host: *const c_char,
+    host_len: usize,
+    port: u16,
+    payload: *const c_char,
+    payload_len: usize,
+    stream_pos: u32,
+    out_len: *mut usize,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        let text = borrowed_str(line, line_len, "config line")?;
+        let host = borrowed_str(host, host_len, "host")?;
+        let bytes = borrowed_bytes(payload, payload_len, "payload")?;
+        let config = parse_dpi_config(text);
+        let strategy = config
+            .strategy_for(host, port)
+            .ok_or_else(|| format!("no rule matches {host}:{port}"))?;
+        let resources = Resources::default();
+        let segments = plan(strategy, bytes, stream_pos, &resources);
+        let encoded: Vec<serde_json::Value> = segments
+            .iter()
+            .map(|segment| {
+                serde_json::json!({
+                    "data": hex_encode(&segment.data),
+                    "seq": segment.seq_override,
+                    "fake": segment.fake,
+                })
+            })
+            .collect();
+        let encoded = serde_json::to_string(&encoded).map_err(|error| error.to_string())?;
+        if !out_len.is_null() {
+            *out_len = encoded.len();
+        }
+        Ok(into_buffer(encoded).0)
+    })
+}
+
+/// The ordered chunks a userspace SOCKS5 transport should write for the first
+/// `payload` of a connection to `host:port`, based on `line`. Concatenating the
+/// chunks reproduces the payload exactly; the number of chunks is the number of
+/// writes (each with `TCP_NODELAY`) that make the kernel emit separate segments.
+///
+/// Returns a JSON array of hex strings so binary payloads survive the boundary.
+/// An empty array means "no rule applies" or "no split"; the caller then writes
+/// the payload whole.
+///
+/// # Safety
+/// All pointers must point to their stated lengths.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_dpi_userspace_chunks(
+    line: *const c_char,
+    line_len: usize,
+    host: *const c_char,
+    host_len: usize,
+    port: u16,
+    payload: *const c_char,
+    payload_len: usize,
+    out_len: *mut usize,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        let text = borrowed_str(line, line_len, "config line")?;
+        let host = borrowed_str(host, host_len, "host")?;
+        let bytes = borrowed_bytes(payload, payload_len, "payload")?;
+        let config = parse_dpi_config(text);
+        let chunks: Vec<String> = match config.strategy_for(host, port) {
+            Some(strategy) if !strategy.split_positions.is_empty() => strategy
+                .userspace_chunks(bytes)
+                .iter()
+                .map(|chunk| hex_encode(chunk))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let encoded = serde_json::to_string(&chunks).map_err(|error| error.to_string())?;
+        if !out_len.is_null() {
+            *out_len = encoded.len();
+        }
+        Ok(into_buffer(encoded).0)
+    })
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,16 +711,14 @@ mod tests {
         let replacement_ptrs: Vec<*const c_char> =
             replacements.iter().map(|s| s.as_ptr()).collect();
 
-        let filter =
-            unsafe { ayu_filter_new(needle_ptrs.as_ptr(), replacement_ptrs.as_ptr(), 2) };
+        let filter = unsafe { ayu_filter_new(needle_ptrs.as_ptr(), replacement_ptrs.as_ptr(), 2) };
         assert!(!filter.is_null(), "filter build failed");
 
         let text = c("brb imo");
         let mut out_len = 0usize;
         let mut changed = 0i32;
-        let output = unsafe {
-            ayu_filter_replace(filter, text.as_ptr(), 7, &mut out_len, &mut changed)
-        };
+        let output =
+            unsafe { ayu_filter_replace(filter, text.as_ptr(), 7, &mut out_len, &mut changed) };
         let output = unsafe { take(output, out_len) };
         assert_eq!(output, "be right back in my opinion");
         assert_eq!(changed, 1);
@@ -609,5 +906,161 @@ mod tests {
         assert!(pointer.is_null());
         let error = unsafe { CStr::from_ptr(ayu_last_error()) };
         assert!(error.to_str().unwrap().contains("UTF-8"));
+    }
+
+    const DPI_LINE: &str = concat!(
+        "--wf-tcp=443,2053 --filter-tcp=443 --hostlist-domains=discord.media ",
+        "--dpi-desync=fake,multidisorder --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq ",
+        "--dpi-desync-split-seqovl=100 --dpi-desync-repeats=6 ",
+        "--new --filter-tcp=2053 --dpi-desync=multisplit --dpi-desync-split-pos=1"
+    );
+
+    #[test]
+    fn dpi_parse_counts_rules_and_reports_capture_ports() {
+        let line = c(DPI_LINE);
+        let mut tcp = vec![0u8; 64];
+        let mut tcp_len = 0usize;
+        let mut udp = vec![0u8; 64];
+        let mut udp_len = 0usize;
+        let rules = unsafe {
+            ayu_dpi_parse(
+                line.as_ptr(),
+                line.as_bytes().len(),
+                tcp.as_mut_ptr() as *mut c_char,
+                tcp.len(),
+                &mut tcp_len,
+                udp.as_mut_ptr() as *mut c_char,
+                udp.len(),
+                &mut udp_len,
+            )
+        };
+        assert_eq!(rules, 2);
+        let tcp_text = std::str::from_utf8(&tcp[..tcp_len]).expect("utf8");
+        assert_eq!(tcp_text, "443,2053");
+        assert_eq!(udp_len, 0);
+    }
+
+    #[test]
+    fn dpi_report_names_what_userspace_cannot_do() {
+        let line = c(DPI_LINE);
+        let mut out_len = 0usize;
+        // transport 0 == userspace
+        let pointer =
+            unsafe { ayu_dpi_report(line.as_ptr(), line.as_bytes().len(), 0, &mut out_len) };
+        let text = unsafe { take(pointer, out_len) };
+        let rules: Vec<serde_json::Value> = serde_json::from_str(&text).expect("json");
+        assert_eq!(rules.len(), 2);
+        let first = &rules[0];
+        let unsupported = first["unsupported"].as_array().expect("array");
+        // fake, badseq, multidisorder, seqovl -> four structural losses
+        assert_eq!(unsupported.len(), 4, "{text}");
+        assert!(unsupported
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("multidisorder")));
+        // the second rule is a plain split, honourable in full
+        assert_eq!(rules[1]["unsupported"].as_array().unwrap().len(), 0);
+        assert_eq!(rules[1]["desyncs"][0], "multisplit");
+    }
+
+    #[test]
+    fn dpi_report_windivert_has_no_structural_losses() {
+        let line = c(DPI_LINE);
+        let mut out_len = 0usize;
+        // transport 1 == WinDivert: it can forge packets and sequences
+        let pointer =
+            unsafe { ayu_dpi_report(line.as_ptr(), line.as_bytes().len(), 1, &mut out_len) };
+        let text = unsafe { take(pointer, out_len) };
+        let rules: Vec<serde_json::Value> = serde_json::from_str(&text).expect("json");
+        for rule in &rules {
+            assert_eq!(
+                rule["unsupported"].as_array().unwrap().len(),
+                0,
+                "WinDivert should honour everything: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn dpi_userspace_chunks_split_and_rejoin_intact() {
+        let line = c("--filter-tcp=443 --dpi-desync=multisplit --dpi-desync-split-pos=1,3");
+        let host = c("example.com");
+        let payload = b"abcdef";
+        let mut out_len = 0usize;
+        let pointer = unsafe {
+            ayu_dpi_userspace_chunks(
+                line.as_ptr(),
+                line.as_bytes().len(),
+                host.as_ptr(),
+                host.as_bytes().len(),
+                443,
+                payload.as_ptr() as *const c_char,
+                payload.len(),
+                &mut out_len,
+            )
+        };
+        let text = unsafe { take(pointer, out_len) };
+        let chunks: Vec<String> = serde_json::from_str(&text).expect("json");
+        assert_eq!(chunks, vec!["61", "6263", "646566"], "{text}");
+        let rejoined: Vec<u8> = chunks
+            .iter()
+            .flat_map(|chunk| {
+                (0..chunk.len() / 2)
+                    .map(|i| u8::from_str_radix(&chunk[i * 2..i * 2 + 2], 16).unwrap())
+            })
+            .collect();
+        assert_eq!(rejoined, payload);
+    }
+
+    #[test]
+    fn dpi_userspace_chunks_empty_when_no_rule_matches() {
+        let line = c("--filter-tcp=443 --dpi-desync=multisplit --dpi-desync-split-pos=1");
+        let host = c("example.com");
+        let payload = b"abc";
+        let mut out_len = 0usize;
+        let pointer = unsafe {
+            ayu_dpi_userspace_chunks(
+                line.as_ptr(),
+                line.as_bytes().len(),
+                host.as_ptr(),
+                host.as_bytes().len(),
+                8443, // no rule for this port
+                payload.as_ptr() as *const c_char,
+                payload.len(),
+                &mut out_len,
+            )
+        };
+        let text = unsafe { take(pointer, out_len) };
+        assert_eq!(text, "[]");
+    }
+
+    #[test]
+    fn dpi_plan_leaves_real_sequences_alone_without_a_fake() {
+        let line = c("--filter-tcp=443 --dpi-desync=multisplit --dpi-desync-split-pos=2 --dpi-desync-fooling=badseq");
+        let host = c("example.com");
+        let payload = b"abcdef";
+        let mut out_len = 0usize;
+        let pointer = unsafe {
+            ayu_dpi_plan(
+                line.as_ptr(),
+                line.as_bytes().len(),
+                host.as_ptr(),
+                host.as_bytes().len(),
+                443,
+                payload.as_ptr() as *const c_char,
+                payload.len(),
+                1000,
+                &mut out_len,
+            )
+        };
+        let text = unsafe { take(pointer, out_len) };
+        let segments: Vec<serde_json::Value> = serde_json::from_str(&text).expect("json");
+        assert_eq!(segments.len(), 2, "{text}");
+        assert_eq!(segments[0]["data"], "6162");
+        assert_eq!(segments[1]["data"], "63646566");
+        // `badseq` forges a fake packet; a plain split without a fake template
+        // has nothing to forge, so the real segments keep the kernel's
+        // sequence and no override is emitted.
+        assert_eq!(segments[0]["seq"], serde_json::Value::Null);
+        assert_eq!(segments[1]["seq"], serde_json::Value::Null);
     }
 }

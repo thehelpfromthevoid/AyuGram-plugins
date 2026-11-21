@@ -46,6 +46,22 @@ try:
 except Exception:
 	pass
 
+# The in-process watcher has the same problem as the native layer, and one
+# more. The bridge never calls `plugin_loader.PluginLoader.__init__`, which was
+# the only place that started it, so it never ran: no `stall-watch.log` exists
+# anywhere while `python_crash.log` does. And once the sandbox is up it can
+# neither read the process (ctypes) nor write its report (open). Both are taken
+# here, before ConfigureSandbox, and the thread is started here too. Only in the
+# application - `_in_bridge` tells the embedded module from the standalone one -
+# so a CLI run or a test does not leave a thread and a handle behind.
+try:
+	from . import stall_watch as _stall_watch
+	if _stall_watch._in_bridge():
+		_stall_watch.warm()
+		_stall_watch.start()
+except Exception:
+	pass
+
 __all__ = ["base_plugin", "hook_utils", "client_utils", "file_utils",
 	"android_utils", "mobile_stubs", "android_only", "gaps"]
 __api_version__ = 2

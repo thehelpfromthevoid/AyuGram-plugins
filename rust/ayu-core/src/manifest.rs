@@ -201,7 +201,8 @@ pub fn parse_lenient(json: &str) -> Result<Manifest, String> {
 }
 
 fn parse_inner(json: &str, drop_unknown_hooks: bool) -> Result<Manifest, String> {
-    let value: Value = serde_json::from_str(json).map_err(|e| truncate_chars(&e.to_string(), 256))?;
+    let value: Value =
+        serde_json::from_str(json).map_err(|e| truncate_chars(&e.to_string(), 256))?;
     // `ParseManifestJson` calls `j.contains(key)` (false for a non-object) and
     // then, unconditionally, `j.value("api_version", kPluginApiVersion)`.
     // nlohmann's `value()` throws `type_error.306` when the document is not an
@@ -280,7 +281,7 @@ fn parse_inner(json: &str, drop_unknown_hooks: bool) -> Result<Manifest, String>
             return Err(format!(
                 "[json.exception.type_error.302] type must be number, but is {}",
                 json_type_name(other)
-            ))
+            ));
         }
     };
 
@@ -302,7 +303,10 @@ fn parse_inner(json: &str, drop_unknown_hooks: bool) -> Result<Manifest, String>
         hooks: {
             let hooks = string_array("hooks");
             if drop_unknown_hooks {
-                hooks.into_iter().filter(|hook| is_known_hook(hook)).collect()
+                hooks
+                    .into_iter()
+                    .filter(|hook| is_known_hook(hook))
+                    .collect()
             } else {
                 hooks
             }
@@ -335,7 +339,7 @@ fn parse_inner(json: &str, drop_unknown_hooks: bool) -> Result<Manifest, String>
                 return Err(format!(
                     "[json.exception.type_error.302] type must be boolean, but is {}",
                     json_type_name(other)
-                ))
+                ));
             }
         }
     }
@@ -430,7 +434,8 @@ mod tests {
 
     #[test]
     fn skips_android_only_plugins_here() {
-        let m = parse_lenient(r#"{"id":"abc","name":"N","platforms":["android"]}"#).expect("parsed");
+        let m =
+            parse_lenient(r#"{"id":"abc","name":"N","platforms":["android"]}"#).expect("parsed");
         assert!(!runs_here(&m));
         assert!(problems(&m).iter().any(|p| p.contains("not this platform")));
         assert!(parse(r#"{"id":"abc","name":"N","platforms":["android"]}"#).is_err());
@@ -455,16 +460,16 @@ mod tests {
 
         // A non-array `platforms` is not present as an array, so it falls
         // through and desktop_only does apply.
-        let m = parse_lenient(r#"{"id":"abc","name":"N","platforms":"desktop","desktop_only":true}"#)
-            .expect("parses");
+        let m =
+            parse_lenient(r#"{"id":"abc","name":"N","platforms":"desktop","desktop_only":true}"#)
+                .expect("parses");
         assert_eq!(m.platforms, ["desktop"]);
 
         // ...but the desktop_only read itself is `value(..., false)`, i.e.
         // get<bool>(), which throws for a non-boolean. The client refuses it.
-        let error = parse_lenient(
-            r#"{"id":"abc","name":"N","platforms":"desktop","desktop_only":"yes"}"#,
-        )
-        .expect_err("must be refused");
+        let error =
+            parse_lenient(r#"{"id":"abc","name":"N","platforms":"desktop","desktop_only":"yes"}"#)
+                .expect_err("must be refused");
         assert!(
             error.contains("type_error.302") && error.contains("boolean"),
             "{error}"
@@ -490,9 +495,18 @@ mod tests {
         // 5000000000 -> 705032704, 2147483648 -> -2147483648, and
         // -2147483649 -> 2147483647. Values observed from the real header.
         for (document, expected) in [
-            (r#"{"id":"abc","name":"N","api_version":5000000000}"#, 705032704),
-            (r#"{"id":"abc","name":"N","api_version":2147483648}"#, -2147483648),
-            (r#"{"id":"abc","name":"N","api_version":-2147483649}"#, 2147483647),
+            (
+                r#"{"id":"abc","name":"N","api_version":5000000000}"#,
+                705032704,
+            ),
+            (
+                r#"{"id":"abc","name":"N","api_version":2147483648}"#,
+                -2147483648,
+            ),
+            (
+                r#"{"id":"abc","name":"N","api_version":-2147483649}"#,
+                2147483647,
+            ),
         ] {
             let m = parse_lenient(document).expect("parses");
             assert_eq!(m.api_version, expected, "{document}");
@@ -510,10 +524,22 @@ mod tests {
         // by triple_check.py, not by native-vs-python parity alone).
         for (document, expected) in [
             (r#"{"id":"abc","name":"N","api_version":1e10}"#, -2147483648),
-            (r#"{"id":"abc","name":"N","api_version":1e300}"#, -2147483648),
-            (r#"{"id":"abc","name":"N","api_version":-1e300}"#, -2147483648),
-            (r#"{"id":"abc","name":"N","api_version":2147483648.0}"#, -2147483648),
-            (r#"{"id":"abc","name":"N","api_version":2147483647.5}"#, 2147483647),
+            (
+                r#"{"id":"abc","name":"N","api_version":1e300}"#,
+                -2147483648,
+            ),
+            (
+                r#"{"id":"abc","name":"N","api_version":-1e300}"#,
+                -2147483648,
+            ),
+            (
+                r#"{"id":"abc","name":"N","api_version":2147483648.0}"#,
+                -2147483648,
+            ),
+            (
+                r#"{"id":"abc","name":"N","api_version":2147483647.5}"#,
+                2147483647,
+            ),
             (r#"{"id":"abc","name":"N","api_version":-0.5}"#, 0),
             (r#"{"id":"abc","name":"N","api_version":100.0}"#, 100),
             (
@@ -600,9 +626,11 @@ mod tests {
         // false casts to 0 and then fails the positive check, not the type check
         let m = parse_lenient(r#"{"id":"abc","name":"N","api_version":false}"#).expect("parses");
         assert_eq!(m.api_version, 0);
-        assert!(problems(&m)
-            .iter()
-            .any(|p| p == "api_version must be a positive number"));
+        assert!(
+            problems(&m)
+                .iter()
+                .any(|p| p == "api_version must be a positive number")
+        );
 
         // A string, null, array or object is refused with nlohmann's own text.
         for (document, kind) in [
@@ -624,7 +652,11 @@ mod tests {
         // `getStr` requires `is_string()`; a number is not stringified.
         let m = parse_lenient(r#"{"id":"abc","name":123}"#).expect("parses");
         assert!(m.name.is_empty());
-        assert!(problems(&m).iter().any(|p| p == "name must be 1..100 chars"));
+        assert!(
+            problems(&m)
+                .iter()
+                .any(|p| p == "name must be 1..100 chars")
+        );
 
         // ...so a null entry falls back to "main.py" instead of failing.
         let m = parse_lenient(r#"{"id":"abc","name":"N","entry":null}"#).expect("parses");

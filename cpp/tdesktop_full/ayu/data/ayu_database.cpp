@@ -226,6 +226,20 @@ void moveCurrentDatabase() {
 
 void initialize() {
 	try {
+		// This store appends one row per deleted message. In the default
+		// rollback journal with full syncing that costs a journal create, two
+		// flushes and a delete for every row, which on a busy account burned a
+		// fifth of a core and megabytes per second of disk at idle. WAL appends
+		// instead of rewriting pages, and NORMAL is the pairing SQLite itself
+		// documents as safe for WAL: a crash may lose the last commits but
+		// cannot corrupt the database. If the switch fails, keep the old mode.
+		try {
+			storage.pragma.journal_mode(sqlite_orm::journal_mode::WAL);
+			storage.pragma.synchronous(1);
+		} catch (const std::exception &ex) {
+			LOG(("Failed to switch AyuGram database to WAL: %1").arg(ex.what()));
+		}
+
 		storage.sync_schema(true);
 
 		runMigrations(storage);

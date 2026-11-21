@@ -11,8 +11,8 @@
 | Release-бинарник | `D:\TBuild\tdesktop\out\Release\AyuGram.exe` (228 МБ) | @CE0fbi | Локально + GitHub Releases |
 
 **Копии бинарника на диске (не удалялись без подтверждения):**
-- `D:\Users\koliy\AyuGram\AyuGram.exe` — байт-в-байт идентична Release-сборке
-- ~24 папки `D:\Users\koliy\AyuGram - <garbled>/` — дубликаты Release (228 МБ каждая)
+- `<app-folder>\AyuGram.exe` — байт-в-байт идентична Release-сборке
+- ~24 папки `<app-folder-duplicate>/` — дубликаты Release (228 МБ каждая)
 - `D:\Build\AyuGram\app\AyuGram.exe` — отдельная более старая сборка
 - `D:\TBuild\AyuGram\app\AyuGram.exe` — отдельная сборка
 - 488 МБ Debug / full-plugins / stale варианты в `D:\TBuild\`

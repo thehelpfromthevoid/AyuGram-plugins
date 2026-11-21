@@ -11,6 +11,7 @@
 #include "ayu/ayu_ui_settings.h"
 #include "ayu/ayu_worker.h"
 #include "ayu/features/streamer_mode/streamer_mode.h"
+#include "ayu/features/dpi/ayu_dpi.h"
 #include "ayu/ui/ayu_logo.h"
 #include "core/application.h"
 #include "features/filters/filters_cache_controller.h"
@@ -518,6 +519,7 @@ void AyuSettings::validate() {
 	validateRange(_messageBubbleRadius, 0, 16, defaults._messageBubbleRadius);
 	validateRange(_wideMultiplier, 0.5, 4.0, defaults._wideMultiplier);
 	validateRange(_avatarCorners, 0, AyuUiSettings::kMaxAvatarCorners, defaults._avatarCorners);
+	validateRange(_dpiPort, 1, 65535, defaults._dpiPort);
 
 	const auto embeddedType = _messageShotSettings._embeddedThemeType.current();
 	auto embeddedTypeValid = (embeddedType == -1) || (embeddedType >= 0 && embeddedType <= 3); // from Window::Theme::EmbeddedType::DayBlue to Window::Theme::EmbeddedType::NightGreen
@@ -1075,6 +1077,35 @@ void AyuSettings::setStreamerMode(bool val) {
 	save();
 }
 
+void AyuSettings::setUseDpiBypass(bool val) {
+	if (_useDpiBypass.current() == val) return;
+	_useDpiBypass = val;
+	// Переключение сразу применяется: обход меняет сетевой маршрут клиента,
+	// и ждать перезапуска, чтобы настройка подействовала, неправильно.
+	Ayu::Dpi::applyFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiUseWebSocket(bool val) {
+	if (_dpiUseWebSocket.current() == val) return;
+	_dpiUseWebSocket = val;
+	// Режим транспорта читается только при подъёме процесса, поэтому здесь
+	// ничего не перезапускаем: он применится при следующем старте обхода.
+	save();
+}
+
+void AyuSettings::setDpiPort(int val) {
+	if (_dpiPort.current() == val) return;
+	_dpiPort = val;
+	save();
+}
+
+void AyuSettings::setDpiStrategy(const QString &val) {
+	if (_dpiStrategy.current() == val) return;
+	_dpiStrategy = val;
+	save();
+}
+
 void to_json(nlohmann::json &j, const AyuSettings &s) {
 	auto ghostAccounts = nlohmann::json::object();
 	for (const auto &[key, value] : s._ghostAccounts) {
@@ -1172,6 +1203,10 @@ void to_json(nlohmann::json &j, const AyuSettings &s) {
 		{"avatarCorners", s._avatarCorners.current()},
 		{"singleCornerRadius", s._singleCornerRadius.current()},
 		{"streamerMode", s._streamerMode.current()},
+		{"useDpiBypass", s._useDpiBypass.current()},
+		{"dpiUseWebSocket", s._dpiUseWebSocket.current()},
+		{"dpiPort", s._dpiPort.current()},
+		{"dpiStrategy", s._dpiStrategy.current()},
 		{"messageShotSettings", s._messageShotSettings}
 	};
 }
@@ -1277,6 +1312,10 @@ void from_json(const nlohmann::json &j, AyuSettings &s) {
 	s._avatarCorners = j.value("avatarCorners", defaults._avatarCorners.current());
 	s._singleCornerRadius = j.value("singleCornerRadius", defaults._singleCornerRadius.current());
 	s._streamerMode = j.value("streamerMode", defaults._streamerMode.current());
+	s._useDpiBypass = j.value("useDpiBypass", defaults._useDpiBypass.current());
+	s._dpiUseWebSocket = j.value("dpiUseWebSocket", defaults._dpiUseWebSocket.current());
+	s._dpiPort = j.value("dpiPort", defaults._dpiPort.current());
+	s._dpiStrategy = j.value("dpiStrategy", defaults._dpiStrategy.current());
 
 	if (j.contains("messageShotSettings") && j["messageShotSettings"].is_object()) {
 		j["messageShotSettings"].get_to(s._messageShotSettings);

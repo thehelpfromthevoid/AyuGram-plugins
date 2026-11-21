@@ -135,7 +135,7 @@ def on_message(msg):
 
 ### Python standalone host
 ```cmd
-cd D:\Users\koliy\AyuGram
+cd <app-folder>
 python tools/selftest.py
 ```
 Результат: 51 passed, 3 failed (все 3 - предудущие ошибки `python314.dll`, не связаны с изменениями).

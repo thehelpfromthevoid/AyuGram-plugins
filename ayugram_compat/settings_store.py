@@ -228,25 +228,36 @@ def write(plugin_id: str, values: Dict[str, Any]) -> bool:
 		# saved anything at all. That reads exactly like "the settings do not
 		# save": a corrected command name silently went back to the junk value it
 		# had before, with nothing in the log to say so.
-		disk: Dict[str, Any] = {}
-		try:
-			values_on_disk, _ = _read_file(key)
-			disk = values_on_disk
-		except Exception:
-			pass
+		#
+		# The whole read-merge-write runs under _LOCK. Reading the file outside
+		# it meant two threads that saved at the same moment both read the disk
+		# before either wrote, so the second merge started from a disk image
+		# that predated the first save and dropped that save entirely - one of
+		# two settings silently reverted. Holding the lock also serialises the
+		# writers, which is what keeps two of them from sharing one `.tmp`.
 		with _LOCK:
+			try:
+				values_on_disk, had_error = _read_file(key)
+			except Exception:
+				values_on_disk, had_error = {}, True
+			if had_error:
+				# A file that cannot be parsed is left as it is. The keys it
+				# still holds are the only copy of those settings, and merging
+				# over it from an empty disk image here would erase them the
+				# first time the plugin saved anything.
+				raise OSError("settings file could not be read")
+			disk: Dict[str, Any] = values_on_disk
 			remembered = dict(_LOADED.get(key, {}))
-		merged = dict(disk)
-		for name, value in values.items():
-			if remembered.get(name, _MISSING) != value:
-				merged[name] = value
+			merged = dict(disk)
+			for name, value in values.items():
+				if remembered.get(name, _MISSING) != value:
+					merged[name] = value
 
-		with _LOCK:
 			_CACHE[key] = dict(merged)
 			_LOADED[key] = dict(merged)
 
-		if not _write_file(key, merged):
-			raise OSError("settings could not be written")
+			if not _write_file(key, merged):
+				raise OSError("settings could not be written")
 		return True
 	except Exception as e:
 		_write(f"write failed: {e}")

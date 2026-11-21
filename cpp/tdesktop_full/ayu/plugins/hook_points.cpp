@@ -201,16 +201,14 @@ PluginSendScope::~PluginSendScope() {
 // One task at a time also means plugin on_message hooks queue up serially
 // instead of all contending for the lock simultaneously.
 //
-// It also runs on a queue of its own rather than through crl::async, which is
-// the main thread. A dump of a frozen application showed the main thread
-// waiting inside this code with no thread inside the interpreter at all: not a
-// plugin taking too long, but the thread that draws the window sitting in a
-// wait it cannot leave. Anything that can block, and this path takes two locks
-// and the interpreter lock to do it, does not belong on that thread.
+// The delivery runs on the main thread, through crl::on_main, rather than on a
+// pool worker. Taking the interpreter lock on a worker does not return in this
+// embedded build: the delivery stalls after the first batch and the rest of the
+// queue sits untouched. The batching above keeps a chat replay to one delivery,
+// so the main thread sees a single call instead of one per message.
 std::mutex g_inboxMutex;
 std::vector<PluginMessage> g_inbox;
 bool g_inboxScheduled = false;
-crl::queue g_inboxQueue;
 
 void RescheduleInbox();
 
@@ -232,9 +230,8 @@ void DrainInbox() {
 			}
 			batch.swap(g_inbox);
 		}
-		// Пока хост не поднят, отдавать некуда: он стартует с главного
-		// потока, а мы здесь рабочий. Сообщения возвращаются в очередь, и
-		// разбор повторится, как только хост будет готов.
+		// Пока хост не поднят, отдавать некуда. Сообщения возвращаются
+		// в очередь, и разбор повторится, как только хост будет готов.
 		if (!Host::instance().started()) {
 			{
 				const auto lock = std::lock_guard(g_inboxMutex);
@@ -249,7 +246,6 @@ void DrainInbox() {
 		for (const auto &msg : batch) {
 			try {
 				Host::instance().emitMessage(msg);
-			} catch (const std::exception &e) {
 			} catch (...) {
 			}
 		}
@@ -356,7 +352,10 @@ void FlushChatOpened() {
 		}
 	}
 	// Something arrived while the hook was running; deliver that too.
-	g_inboxQueue.async(FlushChatOpened);
+	// On the main thread for the same reason as DrainInbox: taking the
+	// interpreter lock on a pool worker does not return in this embedded
+	// build, and the delivery would stall after the first chat.
+	crl::on_main(FlushChatOpened);
 }
 
 } // namespace
@@ -375,7 +374,7 @@ void OnChatOpened(int64 peerId, const QString &title, int account) {
 		}
 		g_chatOpenedScheduled = true;
 	}
-	g_inboxQueue.async(FlushChatOpened);
+	crl::on_main(FlushChatOpened);
 }
 
 std::optional<PluginChat> LastChatOpened() {
@@ -466,7 +465,7 @@ void OnPeerTyping(
 		// appended, and a chat that has been quiet for a moment is skipped
 		// instead of waking a handler for a state it has already reported.
 		auto last = g_typingSent.find(peerId);
-		const auto now = crl::time(0);
+		const auto now = crl::now();
 		if (last != g_typingSent.end()
 			&& now - last->second < kTypingMinIntervalMs) {
 			g_typingPending[peerId] = std::move(typing);
@@ -492,7 +491,10 @@ void OnMessageDeleted(int64 peerId, const std::vector<int64> &msgIds, int accoun
 	ctx.account = account;
 	ctx.peerId = peerId;
 	ctx.msgIds = msgIds;
-	g_inboxQueue.async([ctx = std::move(ctx)] {
+	// Deleted messages are delivered on the main thread, like incoming ones:
+	// the bridge takes the interpreter lock, and a pool worker cannot take it
+	// in this embedded build for the reason spelled out above DrainInbox.
+	crl::on_main([ctx = std::move(ctx)] {
 		Host::instance().emitDeleted(ctx);
 	});
 }
