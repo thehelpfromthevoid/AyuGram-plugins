@@ -532,27 +532,14 @@ void BuildPremiumSection(SectionBuilder &builder) {
 	const auto controller = builder.controller();
 	const auto showOther = builder.showOther();
 
-	if (!session->premiumPossible()) {
-		return;
-	}
-
 	builder.addDivider();
 	builder.addSkip();
 
-	builder.addPremiumButton({
-		.id = u"main/premium"_q,
-		.title = tr::lng_premium_summary_title(),
-		.onClick = [=] {
-			controller->setPremiumRef("settings");
-			showOther(PremiumId());
-		},
-		.keywords = { u"subscription"_q },
-	});
-
-	// TON wallet entry point: sits right below Premium and above Stars.
-	// The balance comes from the already loaded credits TON state, so this
-	// row costs no extra request; the full wallet (address, QR, history)
-	// opens as a separate request only when the user taps through.
+	// TON wallet entry point: always visible, above Premium and Stars, even
+	// when Premium is not available for this account. The balance comes from
+	// the already loaded credits TON state, so this row costs no extra
+	// request; the full wallet (address, QR, history) opens as a separate
+	// request only when the user taps through.
 	session->credits().tonLoad();
 	builder.addButton({
 		.id = u"main/wallet"_q,
@@ -567,6 +554,21 @@ void BuildPremiumSection(SectionBuilder &builder) {
 			showOther(CurrencyId());
 		},
 		.keywords = { u"ton"_q, u"crypto"_q, u"wallet"_q, u"gram"_q, u"кошелёк"_q },
+	});
+
+	if (!session->premiumPossible()) {
+		builder.addSkip();
+		return;
+	}
+
+	builder.addPremiumButton({
+		.id = u"main/premium"_q,
+		.title = tr::lng_premium_summary_title(),
+		.onClick = [=] {
+			controller->setPremiumRef("settings");
+			showOther(PremiumId());
+		},
+		.keywords = { u"subscription"_q },
 	});
 
 	session->credits().load();

@@ -22,6 +22,7 @@ use ayu_core::dpi::{options::parse_line, plan, Desync, Resources, SplitPos, Tran
 use ayu_core::filter::WordFilter;
 use ayu_core::hash;
 use ayu_core::manifest;
+use ayu_core::power;
 use ayu_core::settings::{sanitize_id, SettingsStore};
 
 thread_local! {
@@ -687,6 +688,383 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Parses repeated `KEY=VALUE` power saving entries (`enabled=on|off`,
+/// `low_power=<0..100>`, `<toggle>=on|off`) and returns the resulting state as
+/// JSON: `{"enabled":bool,"lowPower":u8,"toggles":{...}}`. The toggle map always
+/// holds every toggle, so a caller never has to know the table.
+///
+/// Returns NULL and sets `ayu_last_error` on an unknown key, a value that is
+/// neither `on` nor `off`, a threshold outside `0..=100`, or an entry without
+/// `=`. An empty line is valid and yields the default state.
+///
+/// # Safety
+/// `line` must point to `line_len` bytes, `out_len` to a `usize`.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_power_state(
+    line: *const c_char,
+    line_len: usize,
+    out_len: *mut usize,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        let text = borrowed_str(line, line_len, "power saving line")?;
+        let entries = text
+            .split(['\n', ';'])
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned);
+        let settings = power::parse(entries)?;
+        let toggles: serde_json::Map<String, serde_json::Value> = settings
+            .kept_toggles()
+            .map(|(key, keeps)| (key.to_owned(), serde_json::Value::Bool(keeps)))
+            .collect();
+        let encoded = serde_json::to_string(&serde_json::json!({
+            "enabled": settings.enabled,
+            "lowPower": settings.low_power_threshold(),
+            "toggles": toggles,
+        }))
+        .map_err(|error| error.to_string())?;
+        if !out_len.is_null() {
+            *out_len = encoded.len();
+        }
+        Ok(into_buffer(encoded).0)
+    })
+}
+
+/// The arguments a client hands back for storage, one per line, for the settings
+/// it describes in `line` (same shape as `ayu_power_state`). Empty for the
+/// default state, so an older client sees nothing it cannot parse.
+///
+/// # Safety
+/// `line` must point to `line_len` bytes, `out_len` to a `usize`.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_power_arguments(
+    line: *const c_char,
+    line_len: usize,
+    out_len: *mut usize,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        let text = borrowed_str(line, line_len, "power saving line")?;
+        let entries = text
+            .split(['\n', ';'])
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned);
+        let settings = power::parse(entries)?;
+        let encoded = power::arguments(&settings).join("\n");
+        if !out_len.is_null() {
+            *out_len = encoded.len();
+        }
+        Ok(into_buffer(encoded).0)
+    })
+}
+
+/// The toggles the client may show, as JSON, in the beta's own order:
+/// `[{"key","title","info","macOnly"},...]`. `macos` filters out entries the
+/// current platform cannot act on; the keys stay known either way.
+///
+/// # Safety
+/// `out_len` must point to a `usize`.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_power_toggles(macos: c_int, out_len: *mut usize) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        let list: Vec<serde_json::Value> = power::visible_toggles(macos != 0)
+            .map(|toggle| {
+                serde_json::json!({
+                    "key": toggle.key,
+                    "title": toggle.title,
+                    "info": toggle.info,
+                    "macOnly": toggle.mac_only,
+                })
+            })
+            .collect();
+        let encoded = serde_json::to_string(&list).map_err(|error| error.to_string())?;
+        if !out_len.is_null() {
+            *out_len = encoded.len();
+        }
+        Ok(into_buffer(encoded).0)
+    })
+}
+
+/// The strings around the mode its author wrote in the beta: title, info and the
+/// low power explanation, as JSON. Separate from the toggles so a caller can
+/// label the section header without parsing the list.
+///
+/// # Safety
+/// `out_len` must point to a `usize`.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_power_caption(out_len: *mut usize) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        let encoded = serde_json::to_string(&serde_json::json!({
+            "title": power::MODE_TITLE,
+            "info": power::MODE_INFO,
+            "lowPowerInfo": power::LOW_POWER_INFO,
+        }))
+        .map_err(|error| error.to_string())?;
+        if !out_len.is_null() {
+            *out_len = encoded.len();
+        }
+        Ok(into_buffer(encoded).0)
+    })
+}
+
+/// Whether the mode should switch itself on at this battery level, given the
+/// settings in `line`. `1` yes, `0` no, `-1` on a parse failure.
+///
+/// # Safety
+/// `line` must point to `line_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_power_should_enable(
+    line: *const c_char,
+    line_len: usize,
+    battery_percent: c_int,
+) -> c_int {
+    guard(-1, || {
+        let text = borrowed_str(line, line_len, "power saving line")?;
+        let entries = text
+            .split(['\n', ';'])
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned);
+        let settings = power::parse(entries)?;
+        let percent = if battery_percent <= 0 {
+            0
+        } else {
+            battery_percent.min(u8::MAX as c_int) as u8
+        };
+        Ok(if settings.should_enable_at(percent) {
+            1
+        } else {
+            0
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Wallet (TON transfer) exports.
+//
+// The client signs a TON transfer locally and hands the server a finished BOC
+// (`wallet.sendTransfer#d9e5d9e2 data_normal:bytes user_id:InputUser
+// random_id:long`), so the signing stack runs here rather than in C++.
+//
+// The secret phrase never crosses this boundary in the clear: a caller
+// converts it once with `ayu_ton_seed_from_mnemonic`, keeps the 64 bytes in its
+// own buffer, and passes them back per transfer. Every function reports failure
+// through `ayu_last_error()`.
+
+use ayu_wallet::sign;
+use ayu_wallet::ton;
+
+/// Writes a caller-supplied string into a caller buffer, truncating at
+/// `capacity` and always reporting the untruncated length in `out_len`.
+///
+/// # Safety
+/// `buffer` must be valid for `capacity` bytes, `out_len` may be null.
+unsafe fn write_text(
+    text: &str,
+    buffer: *mut c_char,
+    capacity: usize,
+    out_len: *mut usize,
+) -> Result<(), String> {
+    let bytes = text.as_bytes();
+    if !out_len.is_null() {
+        *out_len = bytes.len();
+    }
+    if capacity < bytes.len() {
+        return Err(format!(
+            "buffer too small: need {} bytes, have {capacity}",
+            bytes.len()
+        ));
+    }
+    if !buffer.is_null() && !bytes.is_empty() {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, bytes.len());
+    }
+    Ok(())
+}
+
+/// Converts a secret phrase into the 64-byte BIP39 seed the signer consumes.
+/// Returns 0 on success, -1 on a malformed phrase.
+///
+/// # Safety
+/// `phrase` must point to `phrase_len` bytes, `out_seed` to `out_seed_cap`.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_ton_seed_from_mnemonic(
+    phrase: *const c_char,
+    phrase_len: usize,
+    out_seed: *mut u8,
+    out_seed_cap: usize,
+) -> c_int {
+    guard(-1, || {
+        if out_seed.is_null() {
+            return Err("seed buffer is null".to_owned());
+        }
+        if out_seed_cap < 64 {
+            return Err(format!(
+                "seed buffer must hold 64 bytes, have {out_seed_cap}"
+            ));
+        }
+        let phrase = borrowed_str(phrase, phrase_len, "secret phrase")?;
+        let seed = sign::seed_from_mnemonic(phrase).map_err(|error| error.to_string())?;
+        ptr::copy_nonoverlapping(seed.as_ptr(), out_seed, 64);
+        Ok(0)
+    })
+}
+
+/// Parses a TON address and writes its raw `workchain:hash` form, accepting
+/// both the raw and the user-friendly base64url encodings. Returns 0 on
+/// success, -1 when the address is malformed.
+///
+/// # Safety
+/// All pointers must be valid; `out_len` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_ton_parse_address(
+    text: *const c_char,
+    text_len: usize,
+    out: *mut c_char,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(-1, || {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        let text = borrowed_str(text, text_len, "address")?;
+        let parsed = ton::parse_address(text).map_err(|error| error.to_string())?;
+        write_text(&parsed.to_raw(), out, out_cap, out_len)?;
+        Ok(0)
+    })
+}
+
+/// Writes the user-friendly base64url form of an address. `bounceable` picks
+/// the bouncable tag, `testnet` the testnet tag. Returns 0 or -1.
+///
+/// # Safety
+/// All pointers must be valid; `out_len` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_ton_address_friendly(
+    text: *const c_char,
+    text_len: usize,
+    bounceable: c_int,
+    testnet: c_int,
+    out: *mut c_char,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(-1, || {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        let text = borrowed_str(text, text_len, "address")?;
+        let parsed = ton::parse_address(text).map_err(|error| error.to_string())?;
+        let friendly = parsed.to_friendly(bounceable != 0, testnet != 0);
+        write_text(&friendly, out, out_cap, out_len)?;
+        Ok(0)
+    })
+}
+
+/// Builds and signs the external message for a wallet v4r2 transfer and
+/// returns the BOC, released with `ayu_bytes_free`. The message body hash is
+/// written as lowercase hex into `out_hash`.
+///
+/// `seed` must be exactly 64 bytes. `dest` accepts raw and friendly addresses.
+/// `comment` may be null or empty for a transfer without a comment.
+///
+/// # Safety
+/// Every pointer must point to its stated length; `out_len` and `out_hash_len`
+/// may be null.
+#[no_mangle]
+pub unsafe extern "C" fn ayu_ton_build_transfer(
+    seed: *const u8,
+    seed_len: usize,
+    subwallet_id: u32,
+    seqno: u32,
+    valid_until: u32,
+    dest: *const c_char,
+    dest_len: usize,
+    amount_nano: u64,
+    bounceable: c_int,
+    comment: *const c_char,
+    comment_len: usize,
+    out_len: *mut usize,
+    out_hash: *mut c_char,
+    out_hash_cap: usize,
+    out_hash_len: *mut usize,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        if !out_hash_len.is_null() {
+            *out_hash_len = 0;
+        }
+        if seed.is_null() {
+            return Err("seed is null".to_owned());
+        }
+        if seed_len != 64 {
+            return Err(format!("seed must be 64 bytes, got {seed_len}"));
+        }
+        let mut secret = [0u8; 64];
+        ptr::copy_nonoverlapping(seed, secret.as_mut_ptr(), 64);
+
+        let dest = borrowed_str(dest, dest_len, "destination address")?;
+        let dest = ton::parse_address(dest).map_err(|error| error.to_string())?;
+        let comment = if comment.is_null() || comment_len == 0 {
+            None
+        } else {
+            Some(borrowed_str(comment, comment_len, "comment")?)
+        };
+
+        let (boc, body_hash) = ton::build_v4r2_transfer(
+            &secret,
+            subwallet_id,
+            seqno,
+            valid_until,
+            &dest,
+            amount_nano,
+            bounceable != 0,
+            comment,
+        )
+        .map_err(|error| error.to_string())?;
+        secret.fill(0);
+
+        write_text(
+            &hex_encode(&body_hash),
+            out_hash,
+            out_hash_cap,
+            out_hash_len,
+        )?;
+        if !out_len.is_null() {
+            *out_len = boc.len();
+        }
+        Ok(into_buffer_bytes(&boc))
+    })
+}
+
+/// Hands a byte vector to the caller as a `(pointer, length)` pair, matching
+/// the string buffers so `ayu_bytes_free` releases both.
+///
+/// `ayu_bytes_free` rebuilds the `Vec` with `len == capacity`, so the buffer is
+/// reallocated to exactly its length first. A vector that grew beyond its final
+/// length would otherwise be freed with a mismatched capacity, which is
+/// undefined behaviour.
+fn into_buffer_bytes(bytes: &[u8]) -> *mut c_char {
+    let exact = bytes.to_vec();
+    let pointer = exact.as_ptr() as *mut c_char;
+    std::mem::forget(exact);
+    pointer
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,5 +1440,231 @@ mod tests {
         // sequence and no override is emitted.
         assert_eq!(segments[0]["seq"], serde_json::Value::Null);
         assert_eq!(segments[1]["seq"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn power_state_reports_every_toggle_for_a_default_line() {
+        let line = c("");
+        let mut out_len = 0usize;
+        let pointer = unsafe { ayu_power_state(line.as_ptr(), 0, &mut out_len) };
+        let text = unsafe { take(pointer, out_len) };
+        let state: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(state["enabled"], false);
+        assert_eq!(state["lowPower"], 0);
+        let toggles = state["toggles"].as_object().expect("toggles");
+        // The whole table, so a caller never needs to know the keys.
+        assert_eq!(toggles.len(), power::TOGGLES.len());
+        for toggle in &power::TOGGLES {
+            assert_eq!(toggles[toggle.key], true, "{}", toggle.key);
+        }
+    }
+
+    #[test]
+    fn power_arguments_parse_back_into_the_same_state() {
+        // Feed the arguments the library wrote straight back into the parser:
+        // the only path that proves the two C entry points agree.
+        let line = c("enabled=on\nlow_power=25\ngif=on");
+        let mut args_len = 0usize;
+        let args_pointer =
+            unsafe { ayu_power_arguments(line.as_ptr(), line.as_bytes().len(), &mut args_len) };
+        let written = unsafe { take(args_pointer, args_len) };
+
+        let again = c(&written);
+        let mut state_len = 0usize;
+        let state_pointer =
+            unsafe { ayu_power_state(again.as_ptr(), again.as_bytes().len(), &mut state_len) };
+        let state_text = unsafe { take(state_pointer, state_len) };
+        let state: serde_json::Value = serde_json::from_str(&state_text).expect("json");
+        assert_eq!(state["enabled"], true);
+        assert_eq!(state["lowPower"], 25);
+        assert_eq!(state["toggles"]["gif"], true);
+        assert_eq!(state["toggles"]["video"], false);
+    }
+
+    #[test]
+    fn power_state_refuses_junk_and_reports_why() {
+        for bad in ["animations=yes", "made_up=on", "low_power=300", "broken"] {
+            let line = c(bad);
+            let mut out_len = 0usize;
+            let pointer =
+                unsafe { ayu_power_state(line.as_ptr(), line.as_bytes().len(), &mut out_len) };
+            assert!(pointer.is_null(), "{bad} should fail");
+            assert_eq!(out_len, 0, "{bad}");
+            let message = unsafe {
+                let p = ayu_last_error();
+                assert!(!p.is_null(), "{bad} should explain itself");
+                CStr::from_ptr(p).to_str().expect("utf8").to_owned()
+            };
+            assert!(!message.is_empty(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn power_toggles_drop_mac_only_entries_off_macos() {
+        let mut all_len = 0usize;
+        let all_pointer = unsafe { ayu_power_toggles(1, &mut all_len) };
+        let all_text = unsafe { take(all_pointer, all_len) };
+        let all: Vec<serde_json::Value> = serde_json::from_str(&all_text).expect("json");
+        assert_eq!(all.len(), power::TOGGLES.len());
+
+        let mut here_len = 0usize;
+        let here_pointer = unsafe { ayu_power_toggles(0, &mut here_len) };
+        let here_text = unsafe { take(here_pointer, here_len) };
+        let here: Vec<serde_json::Value> = serde_json::from_str(&here_text).expect("json");
+        assert_eq!(here.len(), power::TOGGLES.len() - 1);
+        assert!(!here
+            .iter()
+            .any(|t| t["key"].as_str() == Some("liquidGlass")));
+        assert!(all.iter().any(|t| t["key"].as_str() == Some("liquidGlass")));
+        // Titles come from the beta verbatim.
+        assert!(all
+            .iter()
+            .any(|t| t["title"].as_str() == Some("Autoplay GIFs")));
+    }
+
+    #[test]
+    fn power_caption_carries_the_beta_strings() {
+        let mut out_len = 0usize;
+        let pointer = unsafe { ayu_power_caption(&mut out_len) };
+        let text = unsafe { take(pointer, out_len) };
+        let caption: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(caption["title"], "Power Saving");
+        assert_eq!(
+            caption["info"],
+            "Reduce all power-intensive animations and improve performance."
+        );
+    }
+
+    #[test]
+    fn power_should_enable_only_below_the_threshold() {
+        let line = c("low_power=20");
+        let at = |percent: c_int| unsafe {
+            ayu_power_should_enable(line.as_ptr(), line.as_bytes().len(), percent)
+        };
+        assert_eq!(at(19), 1);
+        assert_eq!(at(20), 0);
+        assert_eq!(at(0), 1);
+
+        // No threshold: never, even at zero.
+        let off = c("");
+        let never = unsafe { ayu_power_should_enable(off.as_ptr(), 0, 0) };
+        assert_eq!(never, 0);
+
+        // Bad input is an error, not a silent "no".
+        let bad = c("low_power=300");
+        let error = unsafe { ayu_power_should_enable(bad.as_ptr(), bad.as_bytes().len(), 5) };
+        assert_eq!(error, -1);
+    }
+
+    const WALLET_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon \
+        abandon abandon abandon abandon abandon about";
+
+    #[test]
+    fn ton_seed_from_mnemonic_fills_64_bytes() {
+        let phrase = c(WALLET_MNEMONIC);
+        let mut seed = [0u8; 64];
+        let status = unsafe {
+            ayu_ton_seed_from_mnemonic(
+                phrase.as_ptr(),
+                phrase.as_bytes().len(),
+                seed.as_mut_ptr(),
+                seed.len(),
+            )
+        };
+        assert_eq!(status, 0, "seed expand failed: {:?}", unsafe {
+            CStr::from_ptr(ayu_last_error())
+        });
+        assert_ne!(seed, [0u8; 64], "seed must not be all zero");
+    }
+
+    #[test]
+    fn ton_transfer_builds_a_boc_through_the_c_abi() {
+        let phrase = c(WALLET_MNEMONIC);
+        let mut seed = [0u8; 64];
+        let seed_status = unsafe {
+            ayu_ton_seed_from_mnemonic(
+                phrase.as_ptr(),
+                phrase.as_bytes().len(),
+                seed.as_mut_ptr(),
+                seed.len(),
+            )
+        };
+        assert_eq!(seed_status, 0);
+
+        let dest = c("0:0000000000000000000000000000000000000000000000000000000000000000");
+        let mut out_len = 0usize;
+        let mut hash = [0i8; 65];
+        let mut hash_len = 0usize;
+        let pointer = unsafe {
+            ayu_ton_build_transfer(
+                seed.as_ptr(),
+                seed.len(),
+                698983191,
+                1,
+                1_700_000_000,
+                dest.as_ptr(),
+                dest.as_bytes().len(),
+                1_000_000_000,
+                1,
+                ptr::null(),
+                0,
+                &mut out_len,
+                hash.as_mut_ptr(),
+                hash.len(),
+                &mut hash_len,
+            )
+        };
+        assert!(!pointer.is_null(), "transfer build failed: {:?}", unsafe {
+            CStr::from_ptr(ayu_last_error())
+        });
+        assert!(out_len > 0);
+        let bytes = unsafe { slice::from_raw_parts(pointer as *const u8, out_len).to_vec() };
+        unsafe { ayu_bytes_free(pointer, out_len) };
+        assert_eq!(&bytes[..4], &[0xb5, 0xee, 0x9c, 0x72], "BOC magic");
+        assert_eq!(hash_len, 64, "body hash is lowercase hex");
+    }
+
+    #[test]
+    fn ton_parse_address_rejects_junk_and_explains() {
+        let bad = c("definitely not an address");
+        let mut out = [0i8; 128];
+        let mut out_len = 0usize;
+        let status = unsafe {
+            ayu_ton_parse_address(
+                bad.as_ptr(),
+                bad.as_bytes().len(),
+                out.as_mut_ptr(),
+                out.len(),
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, -1);
+        assert_eq!(out_len, 0);
+        let error = unsafe { CStr::from_ptr(ayu_last_error()) };
+        assert!(error.to_str().is_ok(), "error must be valid UTF-8");
+    }
+
+    #[test]
+    fn ton_parse_address_normalizes_raw_form() {
+        let raw = c("0:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+        let mut out = [0i8; 128];
+        let mut out_len = 0usize;
+        let status = unsafe {
+            ayu_ton_parse_address(
+                raw.as_ptr(),
+                raw.as_bytes().len(),
+                out.as_mut_ptr(),
+                out.len(),
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, 0);
+        let text =
+            unsafe { str::from_utf8(slice::from_raw_parts(out.as_ptr() as *const u8, out_len)) }
+                .expect("utf8");
+        assert_eq!(
+            text,
+            "0:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        );
     }
 }

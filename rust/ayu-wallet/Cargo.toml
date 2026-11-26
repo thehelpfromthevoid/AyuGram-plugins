@@ -1,0 +1,15 @@
+[package]
+name = "ayu-wallet"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# All versions pinned to what `cargo search` / crates.io reported for the crate.
+bip39 = { version = "3.0.0", features = ["zeroize"] }
+ed25519-dalek = { version = "3.0.0", features = ["rand_core", "zeroize"] }
+pbkdf2 = { version = "0.13.0", features = ["sha2"] }
+sha2 = "0.11.1"
+hmac = "0.13.0"
+base64 = "0.23.1"
+serde_json = "1"
+zeroize = { version = "1.9.2", features = ["derive"] }

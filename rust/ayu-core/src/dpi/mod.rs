@@ -15,6 +15,7 @@
 use crate::dpi::tls::{ClientHello, seqovl_overlap};
 
 pub mod options;
+pub mod stealth;
 pub mod tls;
 
 /// `--dpi-desync-badseq-increment` default, matching zapret's

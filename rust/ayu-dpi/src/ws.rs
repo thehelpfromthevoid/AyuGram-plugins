@@ -26,6 +26,8 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 use webpki_roots::TLS_SERVER_ROOTS;
 
+use ayu_core::dpi::stealth::StealthOptions;
+
 /// Default data centre when the requested address is not a known Telegram one.
 pub const DEFAULT_DC: i16 = 2;
 
@@ -348,10 +350,15 @@ impl<S: Read + Write> Frames<S> {
     /// HTTP upgrade on an already open connection. Leftover bytes after the
     /// response stay in `buf` as the first frame. `WouldBlock` is treated as
     /// "not yet" and retried until `deadline`.
-    pub fn handshake(&mut self, host: &str) -> io::Result<()> {
+    ///
+    /// `path` is the request target: `/apiws` for the official front, the
+    /// operator's own path for a custom relay. An empty value falls back to
+    /// `/apiws`, so a caller that does not care passes `""`.
+    pub fn handshake(&mut self, host: &str, path: &str) -> io::Result<()> {
         let key = websocket_key();
+        let path = if path.is_empty() { "/apiws" } else { path };
         let request = format!(
-            "GET /apiws HTTP/1.1\r\n\
+            "GET {path} HTTP/1.1\r\n\
              Host: {host}\r\n\
              Upgrade: websocket\r\n\
              Connection: Upgrade\r\n\
@@ -507,13 +514,47 @@ impl<S: Read + Write> Frames<S> {
     }
 }
 
-/// Opens the TLS connection to `kws{dc}` and completes the WebSocket upgrade.
-pub fn connect(dc: i16) -> io::Result<Frames<TlsStream>> {
-    let name = host(dc);
-    let sock = connect_tcp(&name)?;
+/// Where one relay connection goes: the TCP destination, its port, the name the
+/// TLS certificate is checked against, the HTTP request path, and whether a DNS
+/// failure may fall back to the pinned front address.
+///
+/// A custom relay (`--stealth wss_host=...`) replaces the official Telegram web
+/// front, so its resolution failure is returned to the operator instead of
+/// being answered with a Telegram address that has nothing to do with the relay
+/// they chose.
+fn relay_plan(dc: i16, options: &StealthOptions) -> (String, u16, String, String, bool) {
+    let official = options.wss_custom_host.is_empty();
+    let connect_host = if official {
+        host(dc)
+    } else {
+        options.wss_custom_host.clone()
+    };
+    let port = if options.wss_custom_port == 0 {
+        443
+    } else {
+        options.wss_custom_port
+    };
+    let sni = if options.wss_custom_domain.is_empty() {
+        connect_host.clone()
+    } else {
+        options.wss_custom_domain.clone()
+    };
+    let path = if options.wss_custom_path.is_empty() {
+        "/apiws".to_owned()
+    } else {
+        options.wss_custom_path.clone()
+    };
+    (connect_host, port, sni, path, official)
+}
+
+/// Opens the TLS connection to the relay chosen by `options` (the official
+/// `kws{dc}` front by default) and completes the WebSocket upgrade.
+pub fn connect(dc: i16, options: &StealthOptions) -> io::Result<Frames<TlsStream>> {
+    let (connect_host, port, sni, path, allow_fallback) = relay_plan(dc, options);
+    let sock = connect_tcp(&connect_host, port, allow_fallback)?;
     sock.set_nodelay(true)?;
-    let server_name = ServerName::try_from(name.clone())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{name}: {e}")))?;
+    let server_name = ServerName::try_from(sni.clone())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{sni}: {e}")))?;
     let conn = ClientConnection::new(tls_config(), server_name)
         .map_err(|e| io::Error::other(format!("tls: {e}")))?;
     // Non-blocking from the start: the upgrade loop waits on its own deadline,
@@ -525,14 +566,21 @@ pub fn connect(dc: i16) -> io::Result<Frames<TlsStream>> {
         eof: false,
     };
     let mut frames = Frames::new(stream);
-    frames.handshake(&name)?;
+    // The `Host` header names the destination with its port when it is not the
+    // default, as HTTP requires; TLS verification uses `sni` instead.
+    let host_header = if port == 443 {
+        connect_host
+    } else {
+        format!("{connect_host}:{port}")
+    };
+    frames.handshake(&host_header, &path)?;
     Ok(frames)
 }
 
-/// Resolves and connects to `host:443`, falling back to a known front address
-/// when the name does not resolve.
-fn connect_tcp(name: &str) -> io::Result<TcpStream> {
-    match (name, 443u16).to_socket_addrs() {
+/// Resolves and connects to `host:port`, falling back to a known front address
+/// (on `port`) when the name does not resolve and `allow_fallback` is set.
+fn connect_tcp(name: &str, port: u16, allow_fallback: bool) -> io::Result<TcpStream> {
+    match (name, port).to_socket_addrs() {
         Ok(addrs) => {
             let mut last = None;
             for addr in addrs {
@@ -546,7 +594,13 @@ fn connect_tcp(name: &str) -> io::Result<TcpStream> {
                 None => Err(io::Error::new(io::ErrorKind::NotFound, "no address")),
             }
         }
-        Err(_) => TcpStream::connect_timeout(&(FALLBACK_IP, 443).into(), CONNECT_TIMEOUT),
+        Err(_) if allow_fallback => {
+            TcpStream::connect_timeout(&(FALLBACK_IP, port).into(), CONNECT_TIMEOUT)
+        }
+        Err(e) => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("cannot resolve {name}: {e}"),
+        )),
     }
 }
 
@@ -702,6 +756,78 @@ mod tests {
         assert_eq!(host(-4), "kws4.web.telegram.org");
     }
 
+    /// The four `--stealth wss_*` keys reach the wire as the TCP destination,
+    /// the certificate name, the request path and the fallback policy. This is
+    /// the contract between the proxy page (which saves them) and the relay
+    /// (which dials them); a slip in either half would silently keep dialling
+    /// the official front while the page claims otherwise.
+    #[test]
+    fn relay_plan_switches_to_a_custom_relay() {
+        // Official front: the default destination, certificate name and path,
+        // with the pinned-address fallback available when DNS is blocked.
+        let (h, p, sni, path, fallback) = relay_plan(2, &StealthOptions::default());
+        assert_eq!(h, "kws2.web.telegram.org");
+        assert_eq!(p, 443);
+        assert_eq!(sni, "kws2.web.telegram.org");
+        assert_eq!(path, "/apiws");
+        assert!(fallback);
+
+        // Custom relay: every field taken from the options, and no Telegram
+        // fallback, so a resolution failure is reported rather than masked.
+        let custom = StealthOptions {
+            wss_custom_host: "relay.example".to_owned(),
+            wss_custom_port: 8443,
+            wss_custom_path: "/x".to_owned(),
+            wss_custom_domain: "front.example".to_owned(),
+            ..StealthOptions::default()
+        };
+        let (h, p, sni, path, fallback) = relay_plan(2, &custom);
+        assert_eq!(h, "relay.example");
+        assert_eq!(p, 8443);
+        assert_eq!(sni, "front.example");
+        assert_eq!(path, "/x");
+        assert!(!fallback);
+
+        // A zero port is "not set", not port 0.
+        let zero_port = StealthOptions {
+            wss_custom_host: "relay.example".to_owned(),
+            wss_custom_port: 0,
+            ..StealthOptions::default()
+        };
+        assert_eq!(relay_plan(2, &zero_port).1, 443);
+    }
+
+    /// The request line carries the path, and an empty path still asks for the
+    /// official `/apiws`.
+    #[test]
+    fn handshake_uses_the_given_path() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let recorder = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                if sock.read_exact(&mut byte).is_err() {
+                    return;
+                }
+                head.push(byte[0]);
+            }
+            *recorder.lock().unwrap() = String::from_utf8_lossy(&head).into_owned();
+            let _ = sock.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n");
+        });
+        let sock = TcpStream::connect(addr).expect("connect");
+        let mut frames = Frames::new(sock);
+        frames
+            .handshake("relay.example", "/custom/ws")
+            .expect("handshake");
+        let head = seen.lock().unwrap().clone();
+        assert!(head.starts_with("GET /custom/ws HTTP/1.1\r\n"), "{head}");
+        assert!(head.contains("Host: relay.example\r\n"), "{head}");
+    }
+
     #[test]
     fn find_locates_the_header_end() {
         assert_eq!(find(b"abc\r\n\r\nrest", b"\r\n\r\n"), Some(3));
@@ -836,7 +962,7 @@ mod tests {
         let addr = echo_server();
         let sock = TcpStream::connect(addr).expect("connect");
         let mut frames = Frames::new(sock);
-        frames.handshake("localhost").expect("handshake");
+        frames.handshake("localhost", "").expect("handshake");
 
         for message in [&b"hello"[..], &[0u8; 200][..], &[7u8; 70000][..]] {
             frames.write_binary(message).expect("write");
@@ -864,7 +990,7 @@ mod tests {
         });
         let sock = TcpStream::connect(addr).expect("connect");
         let mut frames = Frames::new(sock);
-        let error = frames.handshake("localhost").expect_err("refused");
+        let error = frames.handshake("localhost", "").expect_err("refused");
         assert!(error.to_string().contains("403"), "{error}");
     }
 
@@ -898,7 +1024,7 @@ mod tests {
         sock.set_read_timeout(Some(Duration::from_millis(20)))
             .expect("timeout");
         let mut frames = Frames::new(sock);
-        frames.handshake("localhost").expect("handshake");
+        frames.handshake("localhost", "").expect("handshake");
         let mut got = Vec::new();
         let mut attempts = 0;
         loop {

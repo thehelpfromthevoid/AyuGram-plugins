@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ayu-core", "ayu-ffi", "ayu-dpi"]
+members = ["ayu-core", "ayu-ffi", "ayu-dpi", "ayu-chatparser", "ayu-wallet"]
 
 [workspace.package]
 version = "0.1.0"

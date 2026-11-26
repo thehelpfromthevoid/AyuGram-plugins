@@ -17,7 +17,11 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use ayu_core::dpi::Strategy;
+use ayu_core::dpi::stealth::{
+    ClientHelloFragmentation, StealthOptions, Timing, prepare_client_hello_fragmentation,
+};
 
+use crate::pace::{connection_spacing, record_pacing_delay, sleep_ms};
 use crate::{Proxy, ws};
 
 const SOCKS_VERSION: u8 = 0x05;
@@ -102,7 +106,7 @@ fn handle(proxy: &Proxy, mut client: TcpStream) -> io::Result<()> {
     proxy.connections.fetch_add(1, Ordering::Relaxed);
 
     let strategy = proxy.strategy_for(&host, port).cloned();
-    relay(client, remote, strategy.as_ref());
+    relay(client, remote, strategy.as_ref(), proxy.stealth.as_ref());
     Ok(())
 }
 
@@ -110,7 +114,7 @@ fn handle(proxy: &Proxy, mut client: TcpStream) -> io::Result<()> {
 /// requested address belongs to.
 fn relay_over_websocket(proxy: &Proxy, client: TcpStream, ip: IpAddr) -> io::Result<()> {
     let dc = ws::dc_of(ip).unwrap_or(ws::DEFAULT_DC);
-    let frames = match ws::connect(dc) {
+    let frames = match ws::connect(dc, proxy.stealth.as_ref()) {
         Ok(frames) => frames,
         Err(_) => {
             let mut client = client;
@@ -213,7 +217,12 @@ fn connect_upstream(host: &str, port: u16) -> io::Result<TcpStream> {
 
 /// Relays both directions, desynchronising the first client payload when a
 /// strategy with splits applies.
-fn relay(client: TcpStream, remote: TcpStream, strategy: Option<&Strategy>) {
+fn relay(
+    client: TcpStream,
+    remote: TcpStream,
+    strategy: Option<&Strategy>,
+    stealth: &StealthOptions,
+) {
     // One handle per direction; TcpStream clones share the socket.
     let mut client_read = match client.try_clone() {
         Ok(c) => c,
@@ -227,16 +236,29 @@ fn relay(client: TcpStream, remote: TcpStream, strategy: Option<&Strategy>) {
     let mut remote_write = remote;
 
     let owned = strategy.cloned();
-    // client -> remote, with the first-payload desync.
+    let fragmentation = stealth.client_hello_fragmentation;
+    let spacing_ms = connection_spacing(stealth.connection_pattern);
+    let timing = stealth.timing;
+    // client -> remote, with the first-payload desync, the connection spacing
+    // and the data-phase pacing.
     let forward = std::thread::spawn(move || {
         let first = match read_first_payload(&mut client_read) {
             Ok(buf) => buf,
             Err(_) => return,
         };
-        if !write_first_payload(&mut remote_write, &first, owned.as_ref()) {
+        // The beta holds the ClientHello back for the configured spacing after
+        // the TCP connect (`TlsSocket::plainConnected`); the equivalent point on
+        // this transport is between the upstream connect and the first payload.
+        if !first.is_empty() {
+            sleep_ms(spacing_ms);
+        }
+        if !write_first_payload(&mut remote_write, &first, owned.as_ref(), fragmentation) {
             return;
         }
-        let _ = io::copy(&mut client_read, &mut remote_write);
+        // The first payload is the ClientHello, the beta's first record, so the
+        // data-phase pacing starts counting from one.
+        let frames_written = u32::from(!first.is_empty());
+        pace_uplink(&mut client_read, &mut remote_write, timing, frames_written);
         let _ = remote_write.shutdown(std::net::Shutdown::Write);
     });
 
@@ -244,6 +266,41 @@ fn relay(client: TcpStream, remote: TcpStream, strategy: Option<&Strategy>) {
     let _ = io::copy(&mut remote_read, &mut client_write);
     let _ = client_write.shutdown(std::net::Shutdown::Write);
     let _ = forward.join();
+}
+
+/// Forwards the rest of the client stream to the remote, applying the beta's
+/// data-phase pacing (`TlsSocket::recordPacingDelay`): every write after the
+/// first is preceded by a delay drawn from how many writes have already gone
+/// out, and pacing stops after the beta's frame cap. `frames_written` is the
+/// count already sent before this loop (the ClientHello is one). With
+/// `Timing::Off` every delay is zero, so this is a plain copy and the proven
+/// path adds no latency.
+///
+/// The beta paces TLS records; this transport carries the obfuscated MTProto
+/// stream, so a frame here is one write this relay makes. The delay values and
+/// the frame cap are the beta's; only the boundary they attach to is this
+/// relay's own.
+fn pace_uplink(
+    client: &mut TcpStream,
+    remote: &mut TcpStream,
+    timing: Timing,
+    frames_written: u32,
+) {
+    let mut buf = vec![0u8; 32 * 1024];
+    let mut written = frames_written;
+    loop {
+        let n = match client.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        sleep_ms(record_pacing_delay(timing, written));
+        if remote.write_all(&buf[..n]).is_err() {
+            break;
+        }
+        written += 1;
+    }
 }
 
 /// Reads the first payload, extending it to cover a whole TLS record when the
@@ -270,29 +327,29 @@ fn read_first_payload(client: &mut TcpStream) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Writes the first payload, applying the split strategy when present.
+/// Writes the first payload, applying the split strategy when present and the
+/// stealth ClientHello fragmentation when it applies.
+///
+/// The two mechanisms both cut the first payload, so they do not stack: the
+/// strategy's own splits win when it has any, because the configured strategy
+/// is the operator's explicit desync line and it is the one proven end to end;
+/// the stealth fragmentation then applies only to a payload the strategy does
+/// not already split. [`Proxy::stealth_report`] says when this happens.
 /// Returns false when nothing could be written (connection is dead).
 fn write_first_payload(
     remote: &mut TcpStream,
     payload: &[u8],
     strategy: Option<&Strategy>,
+    fragmentation: ClientHelloFragmentation,
 ) -> bool {
-    if payload.is_empty() {
-        return true;
-    }
-    let chunks = match strategy {
-        Some(s) if !s.split_positions.is_empty() => {
-            let chunks = s.userspace_chunks(payload);
-            if chunks.len() > 1 {
-                chunks
-            } else {
-                vec![payload.to_vec()]
-            }
+    let (chunks, delay_ms) = plan_first_payload(payload, strategy, fragmentation);
+    for (index, chunk) in chunks.iter().enumerate() {
+        if index > 0 && delay_ms > 0 {
+            // The pause between the two hello pieces is the point of the soft
+            // fragmentation: the DPI must not see them as one burst.
+            std::thread::sleep(Duration::from_millis(u64::from(delay_ms)));
         }
-        _ => vec![payload.to_vec()],
-    };
-    for chunk in chunks {
-        if remote.write_all(&chunk).is_err() {
+        if remote.write_all(chunk).is_err() {
             return false;
         }
         // A flush between chunks is what makes the kernel emit separate
@@ -302,6 +359,43 @@ fn write_first_payload(
         }
     }
     true
+}
+
+/// The pure decision `write_first_payload` makes: the ordered chunks to write
+/// for the first payload and the pause to take between them.
+///
+/// Kept separate from the socket so a test can assert the exact cut points,
+/// which is the only way to tell "the strategy split" from "the stealth
+/// fragmentation split" - both rejoin to the same bytes.
+fn plan_first_payload(
+    payload: &[u8],
+    strategy: Option<&Strategy>,
+    fragmentation: ClientHelloFragmentation,
+) -> (Vec<Vec<u8>>, u16) {
+    if payload.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let strategy_chunks = match strategy {
+        Some(s) if !s.split_positions.is_empty() => {
+            let chunks = s.userspace_chunks(payload);
+            if chunks.len() > 1 { Some(chunks) } else { None }
+        }
+        _ => None,
+    };
+
+    match strategy_chunks {
+        Some(chunks) => (chunks, 0u16),
+        None => match prepare_client_hello_fragmentation(payload, fragmentation) {
+            Some(plan) if plan.first_size < payload.len() => (
+                vec![
+                    payload[..plan.first_size].to_vec(),
+                    payload[plan.first_size..].to_vec(),
+                ],
+                plan.second_delay_ms,
+            ),
+            _ => (vec![payload.to_vec()], 0),
+        },
+    }
 }
 
 /// The total length of a TLS record starting at `buf[0]`, if `buf` starts one.
@@ -321,6 +415,7 @@ fn tls_record_len(buf: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
     use ayu_core::dpi::options::parse_line;
+    use ayu_core::dpi::stealth::ConnectionPattern;
 
     #[test]
     fn tls_record_len_reads_the_header() {
@@ -335,39 +430,250 @@ mod tests {
         assert_eq!(tls_record_len(&[0x16, 0x03]), None);
     }
 
-    #[test]
-    fn write_first_payload_splits_then_joins_intact() {
-        // A local socket pair to observe that bytes survive the split.
+    /// A socket pair whose sender goes through `write_first_payload`, so a test
+    /// can read back what actually crossed, including the split.
+    fn roundtrip(
+        payload: &[u8],
+        strategy: Option<&Strategy>,
+        fragmentation: ClientHelloFragmentation,
+    ) -> Vec<u8> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let mut sender = TcpStream::connect(addr).expect("connect");
         let (mut receiver, _) = listener.accept().expect("accept");
 
-        let cfg = parse_line("--filter-tcp=443 --dpi-desync=multisplit --dpi-desync-split-pos=1");
-        let strategy = cfg.rules[0].strategy.clone();
-        let payload = b"CLIENTHELLO";
-        assert!(write_first_payload(&mut sender, payload, Some(&strategy)));
+        assert!(write_first_payload(
+            &mut sender,
+            payload,
+            strategy,
+            fragmentation
+        ));
         sender
             .shutdown(std::net::Shutdown::Write)
             .expect("shutdown");
 
         let mut got = Vec::new();
         receiver.read_to_end(&mut got).expect("read");
+        got
+    }
+
+    #[test]
+    fn write_first_payload_splits_then_joins_intact() {
+        let cfg = parse_line("--filter-tcp=443 --dpi-desync=multisplit --dpi-desync-split-pos=1");
+        let strategy = cfg.rules[0].strategy.clone();
+        let payload = b"CLIENTHELLO";
+        let got = roundtrip(payload, Some(&strategy), ClientHelloFragmentation::Off);
         assert_eq!(got, payload);
     }
 
     #[test]
     fn no_strategy_writes_the_whole_payload() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let mut sender = TcpStream::connect(addr).expect("connect");
-        let (mut receiver, _) = listener.accept().expect("accept");
-        assert!(write_first_payload(&mut sender, b"x", None));
-        sender
-            .shutdown(std::net::Shutdown::Write)
-            .expect("shutdown");
-        let mut got = Vec::new();
-        receiver.read_to_end(&mut got).expect("read");
+        let got = roundtrip(b"x", None, ClientHelloFragmentation::Off);
         assert_eq!(got, b"x");
+    }
+
+    /// A well-formed ClientHello-shaped buffer above the 384-byte fragment
+    /// floor, with a real SNI in the hostname range, so the stealth plan is the
+    /// one the C++ side would also choose.
+    fn hello_fixture() -> Vec<u8> {
+        let mut hello = vec![
+            0x16, 0x03, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x03,
+        ];
+        hello.extend_from_slice(&[0u8; 32]);
+        hello.push(0);
+        hello.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
+        hello.push(1);
+        hello.push(0);
+        let host = b"fragment.test";
+        let mut sni = Vec::new();
+        sni.extend_from_slice(&[0x00, 0x00]);
+        sni.extend_from_slice(&(host.len() as u16 + 5).to_be_bytes());
+        sni.extend_from_slice(&(host.len() as u16 + 3).to_be_bytes());
+        sni.push(0);
+        sni.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        sni.extend_from_slice(host);
+        hello.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+        hello.extend_from_slice(&sni);
+        // Pad the handshake body to cross 384 bytes.
+        while hello.len() < 400 {
+            hello.push(0);
+        }
+        // Fix the record and handshake lengths so the buffer is well formed.
+        let hs_len = hello.len() - 5 - 4;
+        hello[6] = (hs_len >> 16) as u8;
+        hello[7] = (hs_len >> 8) as u8;
+        hello[8] = hs_len as u8;
+        let rec_len = hello.len() - 5;
+        hello[3] = (rec_len >> 8) as u8;
+        hello[4] = rec_len as u8;
+        hello
+    }
+
+    #[test]
+    fn stealth_fragmentation_cuts_the_hello_and_joins_it_back() {
+        let hello = hello_fixture();
+        let got = roundtrip(&hello, None, ClientHelloFragmentation::Soft);
+        // The bytes survive a split with a pause in between.
+        assert_eq!(got, hello);
+    }
+
+    #[test]
+    fn the_strategy_splits_win_over_the_stealth_fragmentation() {
+        // Both mechanisms can cut the first payload; a configured strategy is
+        // the operator's explicit line, so it must be the one applied. The
+        // observable difference is the split point: this strategy cuts after
+        // byte 4, while the stealth plan would cut inside the SNI range far
+        // to the right. A rejoin-only assertion cannot tell them apart.
+        let cfg = parse_line("--filter-tcp=443 --dpi-desync=multisplit --dpi-desync-split-pos=4");
+        let strategy = cfg.rules[0].strategy.clone();
+        let payload = b"0123456789abcdef";
+        let (chunks, delay) =
+            plan_first_payload(payload, Some(&strategy), ClientHelloFragmentation::Soft);
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
+        assert_eq!(chunks[0], b"0123");
+        assert_eq!(chunks[1], b"456789abcdef");
+        // The strategy's split carries no stealth pause.
+        assert_eq!(delay, 0);
+        // And the bytes still cross intact.
+        assert_eq!(
+            roundtrip(payload, Some(&strategy), ClientHelloFragmentation::Soft),
+            payload
+        );
+    }
+
+    #[test]
+    fn a_hello_shaped_payload_is_actually_cut_by_the_stealth_plan() {
+        // With no strategy splits at all, the stealth plan is the one that cuts,
+        // and it must cut strictly inside the buffer, not hand back one chunk.
+        let hello = hello_fixture();
+        let (chunks, _delay) = plan_first_payload(&hello, None, ClientHelloFragmentation::Soft);
+        assert!(chunks.len() >= 2, "the hello was not cut: {chunks:?}");
+        assert!(chunks.iter().map(Vec::len).sum::<usize>() == hello.len());
+        assert_eq!(chunks[0], hello[..chunks[0].len()]);
+    }
+
+    #[test]
+    fn stealth_fragmentation_ignores_a_short_payload() {
+        // Below the 384-byte floor the plan is None, so the payload goes out
+        // whole. The bytes are unchanged either way, which is the invariant.
+        let got = roundtrip(b"short", None, ClientHelloFragmentation::Soft);
+        assert_eq!(got, b"short");
+    }
+
+    /// Runs the real relay between a client-side pair and an upstream-side pair.
+    /// Returns the joined relay thread, the writing end the test uses as the
+    /// client, and the reading end that stands for the upstream server.
+    fn relay_pair(
+        stealth: StealthOptions,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        TcpStream,
+        TcpStream,
+        std::net::TcpListener,
+    ) {
+        // The upstream socket the relay dials is one end of `up_listener`; the
+        // test reads the payload from the other end.
+        let up_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        let up_addr = up_listener.local_addr().expect("addr");
+        let remote = TcpStream::connect(up_addr).expect("connect upstream");
+        let (up_server, _) = up_listener.accept().expect("accept upstream");
+
+        // The client socket the relay serves is one end of `cli_listener`.
+        let cli_listener = TcpListener::bind("127.0.0.1:0").expect("bind client");
+        let cli_addr = cli_listener.local_addr().expect("addr");
+        let client = TcpStream::connect(cli_addr).expect("connect client");
+        let (cli_server, _) = cli_listener.accept().expect("accept client");
+
+        let handle = std::thread::spawn(move || {
+            relay(cli_server, remote, None, &stealth);
+        });
+        (handle, client, up_server, cli_listener)
+    }
+
+    /// The connection spacing really delays the first payload, and `Off` does
+    /// not: the beta's `ConnectionSpacing` reached the wire with its own value.
+    #[test]
+    fn connection_spacing_delays_the_first_payload() {
+        let stealth = StealthOptions {
+            connection_pattern: ConnectionPattern::Strict, // 700 ms
+            ..StealthOptions::default()
+        };
+        let (_handle, mut client, mut up_server, _l) = relay_pair(stealth);
+
+        let start = std::time::Instant::now();
+        client.write_all(b"CLIENTHELLO").expect("write");
+        client.flush().expect("flush");
+        let mut got = [0u8; 11];
+        up_server.read_exact(&mut got).expect("read");
+        let elapsed = start.elapsed();
+
+        assert_eq!(&got, b"CLIENTHELLO");
+        // 700 ms minus generous scheduling slack; the point is that the delay
+        // is real, not that it is exact.
+        assert!(
+            elapsed >= Duration::from_millis(600),
+            "first payload crossed in {elapsed:?}, spacing was not applied"
+        );
+    }
+
+    #[test]
+    fn no_spacing_when_the_pattern_is_off() {
+        let stealth = StealthOptions {
+            connection_pattern: ConnectionPattern::Off,
+            ..StealthOptions::default()
+        };
+        let (_handle, mut client, mut up_server, _l) = relay_pair(stealth);
+
+        let start = std::time::Instant::now();
+        client.write_all(b"CLIENTHELLO").expect("write");
+        client.flush().expect("flush");
+        let mut got = [0u8; 11];
+        up_server.read_exact(&mut got).expect("read");
+        let elapsed = start.elapsed();
+
+        assert_eq!(&got, b"CLIENTHELLO");
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "first payload took {elapsed:?} with spacing off"
+        );
+    }
+
+    /// Pacing delays every chunk after the first, so two chunks written at once
+    /// arrive apart, while a single chunk is not delayed at all.
+    #[test]
+    fn data_phase_pacing_separates_chunks() {
+        let stealth = StealthOptions {
+            timing: Timing::Balanced, // 20..100 ms per gap
+            ..StealthOptions::default()
+        };
+        let (_handle, mut client, mut up_server, _l) = relay_pair(stealth);
+
+        let start = std::time::Instant::now();
+        client.write_all(b"ONE").expect("write");
+        client.flush().expect("flush");
+        let mut first = [0u8; 3];
+        up_server.read_exact(&mut first).expect("read first");
+        // The first chunk itself is not paced (delay is drawn from the count of
+        // chunks already written, which is zero here).
+        assert!(
+            start.elapsed() < Duration::from_millis(80),
+            "the first chunk was paced: {:?}",
+            start.elapsed()
+        );
+
+        let second_start = std::time::Instant::now();
+        client.write_all(b"TWO").expect("write");
+        client.flush().expect("flush");
+        let mut second = [0u8; 3];
+        up_server.read_exact(&mut second).expect("read second");
+        assert_eq!(&first, b"ONE");
+        assert_eq!(&second, b"TWO");
+        // The gap before the second chunk is the beta's balanced delay, at
+        // least its lower bound of 20 ms minus scheduling slack.
+        assert!(
+            second_start.elapsed() >= Duration::from_millis(10),
+            "second chunk was not paced: {:?}",
+            second_start.elapsed()
+        );
     }
 }

@@ -520,6 +520,12 @@ void AyuSettings::validate() {
 	validateRange(_wideMultiplier, 0.5, 4.0, defaults._wideMultiplier);
 	validateRange(_avatarCorners, 0, AyuUiSettings::kMaxAvatarCorners, defaults._avatarCorners);
 	validateRange(_dpiPort, 1, 65535, defaults._dpiPort);
+	// Профиль ClientHello: 0..7, порядок ProxyTlsProfile из proxy_data.h.
+	validateRange(_dpiStealthTlsProfile, 0, 7, defaults._dpiStealthTlsProfile);
+	// Порт WSS-релея: 0 значит "официальный фронт", остальное - рабочий порт.
+	validateRange(_dpiStealthWssPort, 0, 65535, defaults._dpiStealthWssPort);
+	// Автопорог батареи: 0 значит "никогда", 1..100 - процент заряда.
+	validateRange(_powerSavingLowPowerThreshold, 0, 100, defaults._powerSavingLowPowerThreshold);
 
 	const auto embeddedType = _messageShotSettings._embeddedThemeType.current();
 	auto embeddedTypeValid = (embeddedType == -1) || (embeddedType >= 0 && embeddedType <= 3); // from Window::Theme::EmbeddedType::DayBlue to Window::Theme::EmbeddedType::NightGreen
@@ -1077,6 +1083,16 @@ void AyuSettings::setStreamerMode(bool val) {
 	save();
 }
 
+void AyuSettings::setPowerSavingLowPowerThreshold(int val) {
+	// 0..100, как в бете: 0 выключает автопорог, 100 - порог на всей шкале.
+	if (val < 0 || val > 100) return;
+	if (_powerSavingLowPowerThreshold.current() == val) return;
+	_powerSavingLowPowerThreshold = val;
+	// Ничего не перезапускаем: порог читает сам клиент при обновлении заряда
+	// батареи (core/application.cpp), а не отдельный процесс.
+	save();
+}
+
 void AyuSettings::setUseDpiBypass(bool val) {
 	if (_useDpiBypass.current() == val) return;
 	_useDpiBypass = val;
@@ -1086,11 +1102,16 @@ void AyuSettings::setUseDpiBypass(bool val) {
 	save();
 }
 
+// Опции стелса читаются процессом один раз, при подъёме ayu-dpi. Поэтому смена
+// любой из них должна перезапустить процесс: иначе тумблер в UI меняет только
+// сохранённое значение, а соединения продолжают идти по старой политике, и
+// переключатель выглядит сломанным. Транспорт ("Route via WSS") - та же ручка
+// на том же процессе, поэтому он идёт по общему пути.
+
 void AyuSettings::setDpiUseWebSocket(bool val) {
 	if (_dpiUseWebSocket.current() == val) return;
 	_dpiUseWebSocket = val;
-	// Режим транспорта читается только при подъёме процесса, поэтому здесь
-	// ничего не перезапускаем: он применится при следующем старте обхода.
+	Ayu::Dpi::restartFromSettings();
 	save();
 }
 
@@ -1103,6 +1124,125 @@ void AyuSettings::setDpiPort(int val) {
 void AyuSettings::setDpiStrategy(const QString &val) {
 	if (_dpiStrategy.current() == val) return;
 	_dpiStrategy = val;
+	save();
+}
+
+// Опции стелса читаются процессом один раз, при подъёме ayu-dpi. Поэтому смена
+// любой из них должна перезапустить процесс: иначе тумблер в UI меняет только
+// сохранённое значение, а соединения продолжают идти по старой политике, и
+// переключатель выглядит сломанным. Транспорт ("Route via WSS") - та же ручка
+// на том же процессе, поэтому он идёт по общему пути.
+
+void AyuSettings::setDpiStealthFragmentClientHello(bool val) {
+	if (_dpiStealthFragmentClientHello.current() == val) return;
+	_dpiStealthFragmentClientHello = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthSpreadConnections(bool val) {
+	if (_dpiStealthSpreadConnections.current() == val) return;
+	_dpiStealthSpreadConnections = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthMaskStart(bool val) {
+	if (_dpiStealthMaskStart.current() == val) return;
+	_dpiStealthMaskStart = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthVaryRecordSizes(bool val) {
+	if (_dpiStealthVaryRecordSizes.current() == val) return;
+	_dpiStealthVaryRecordSizes = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthPaceTraffic(bool val) {
+	if (_dpiStealthPaceTraffic.current() == val) return;
+	_dpiStealthPaceTraffic = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthSyntheticPsk(bool val) {
+	if (_dpiStealthSyntheticPsk.current() == val) return;
+	_dpiStealthSyntheticPsk = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthTlsProfile(int val) {
+	if (val < 0 || val > 7) return;
+	if (_dpiStealthTlsProfile.current() == val) return;
+	_dpiStealthTlsProfile = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthWssHost(const QString &val) {
+	if (_dpiStealthWssHost.current() == val) return;
+	_dpiStealthWssHost = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthWssPort(int val) {
+	if (val < 0 || val > 65535) return;
+	if (_dpiStealthWssPort.current() == val) return;
+	_dpiStealthWssPort = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthWssPath(const QString &val) {
+	if (_dpiStealthWssPath.current() == val) return;
+	_dpiStealthWssPath = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthWssDomain(const QString &val) {
+	if (_dpiStealthWssDomain.current() == val) return;
+	_dpiStealthWssDomain = val;
+	Ayu::Dpi::restartFromSettings();
+	save();
+}
+
+void AyuSettings::setDpiStealthWss(
+		const QString &host,
+		int port,
+		const QString &path,
+		const QString &domain) {
+	const auto clamped = (port > 65535) ? 65535 : (port < 0 ? 0 : port);
+	auto changed = false;
+	if (_dpiStealthWssHost.current() != host) {
+		_dpiStealthWssHost = host;
+		changed = true;
+	}
+	if (_dpiStealthWssPort.current() != clamped) {
+		_dpiStealthWssPort = clamped;
+		changed = true;
+	}
+	if (_dpiStealthWssPath.current() != path) {
+		_dpiStealthWssPath = path;
+		changed = true;
+	}
+	if (_dpiStealthWssDomain.current() != domain) {
+		_dpiStealthWssDomain = domain;
+		changed = true;
+	}
+	if (!changed) {
+		// Ни одно поле не поменялось: перезапускать процесс нечего, но save()
+		// всё равно нужен, чтобы уже введённые значения легли на диск - иначе
+		// закрытие бокса после набора без реального изменения теряло бы ввод.
+		save();
+		return;
+	}
+	Ayu::Dpi::restartFromSettings();
 	save();
 }
 
@@ -1146,6 +1286,7 @@ void to_json(nlohmann::json &j, const AyuSettings &s) {
 		{"appIcon", s._appIcon.current()},
 		{"simpleQuotesAndReplies", s._simpleQuotesAndReplies.current()},
 		{"hideFastShare", s._hideFastShare.current()},
+		{"powerSavingLowPowerThreshold", s._powerSavingLowPowerThreshold.current()},
 		{"replaceBottomInfoWithIcons", s._replaceBottomInfoWithIcons.current()},
 		{"deletedMark", s._deletedMark.current()},
 		{"editedMark", s._editedMark.current()},
@@ -1207,6 +1348,17 @@ void to_json(nlohmann::json &j, const AyuSettings &s) {
 		{"dpiUseWebSocket", s._dpiUseWebSocket.current()},
 		{"dpiPort", s._dpiPort.current()},
 		{"dpiStrategy", s._dpiStrategy.current()},
+		{"dpiStealthFragmentClientHello", s._dpiStealthFragmentClientHello.current()},
+		{"dpiStealthSpreadConnections", s._dpiStealthSpreadConnections.current()},
+		{"dpiStealthMaskStart", s._dpiStealthMaskStart.current()},
+		{"dpiStealthVaryRecordSizes", s._dpiStealthVaryRecordSizes.current()},
+		{"dpiStealthPaceTraffic", s._dpiStealthPaceTraffic.current()},
+		{"dpiStealthSyntheticPsk", s._dpiStealthSyntheticPsk.current()},
+		{"dpiStealthTlsProfile", s._dpiStealthTlsProfile.current()},
+		{"dpiStealthWssHost", s._dpiStealthWssHost.current()},
+		{"dpiStealthWssPort", s._dpiStealthWssPort.current()},
+		{"dpiStealthWssPath", s._dpiStealthWssPath.current()},
+		{"dpiStealthWssDomain", s._dpiStealthWssDomain.current()},
 		{"messageShotSettings", s._messageShotSettings}
 	};
 }
@@ -1255,6 +1407,7 @@ void from_json(const nlohmann::json &j, AyuSettings &s) {
 	s._appIcon = j.value("appIcon", defaults._appIcon.current());
 	s._simpleQuotesAndReplies = j.value("simpleQuotesAndReplies", defaults._simpleQuotesAndReplies.current());
 	s._hideFastShare = j.value("hideFastShare", defaults._hideFastShare.current());
+	s._powerSavingLowPowerThreshold = j.value("powerSavingLowPowerThreshold", defaults._powerSavingLowPowerThreshold.current());
 	s._replaceBottomInfoWithIcons = j.value("replaceBottomInfoWithIcons", defaults._replaceBottomInfoWithIcons.current());
 	s._deletedMark = j.value("deletedMark", defaults._deletedMark.current());
 	s._editedMark = j.value("editedMark", defaults._editedMark.current());
@@ -1316,6 +1469,17 @@ void from_json(const nlohmann::json &j, AyuSettings &s) {
 	s._dpiUseWebSocket = j.value("dpiUseWebSocket", defaults._dpiUseWebSocket.current());
 	s._dpiPort = j.value("dpiPort", defaults._dpiPort.current());
 	s._dpiStrategy = j.value("dpiStrategy", defaults._dpiStrategy.current());
+	s._dpiStealthFragmentClientHello = j.value("dpiStealthFragmentClientHello", defaults._dpiStealthFragmentClientHello.current());
+	s._dpiStealthSpreadConnections = j.value("dpiStealthSpreadConnections", defaults._dpiStealthSpreadConnections.current());
+	s._dpiStealthMaskStart = j.value("dpiStealthMaskStart", defaults._dpiStealthMaskStart.current());
+	s._dpiStealthVaryRecordSizes = j.value("dpiStealthVaryRecordSizes", defaults._dpiStealthVaryRecordSizes.current());
+	s._dpiStealthPaceTraffic = j.value("dpiStealthPaceTraffic", defaults._dpiStealthPaceTraffic.current());
+	s._dpiStealthSyntheticPsk = j.value("dpiStealthSyntheticPsk", defaults._dpiStealthSyntheticPsk.current());
+	s._dpiStealthTlsProfile = j.value("dpiStealthTlsProfile", defaults._dpiStealthTlsProfile.current());
+	s._dpiStealthWssHost = j.value("dpiStealthWssHost", defaults._dpiStealthWssHost.current());
+	s._dpiStealthWssPort = j.value("dpiStealthWssPort", defaults._dpiStealthWssPort.current());
+	s._dpiStealthWssPath = j.value("dpiStealthWssPath", defaults._dpiStealthWssPath.current());
+	s._dpiStealthWssDomain = j.value("dpiStealthWssDomain", defaults._dpiStealthWssDomain.current());
 
 	if (j.contains("messageShotSettings") && j["messageShotSettings"].is_object()) {
 		j["messageShotSettings"].get_to(s._messageShotSettings);

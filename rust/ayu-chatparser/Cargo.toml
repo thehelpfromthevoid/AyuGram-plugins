@@ -1,0 +1,12 @@
+[package]
+name = "ayu-chatparser"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ayu-chatparser"
+path = "src/main.rs"
+
+[dependencies]
+scraper = "0.29"
+serde_json = { version = "1", features = ["preserve_order"] }

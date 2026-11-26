@@ -365,6 +365,43 @@ public:
 	[[nodiscard]] int dpiPort() const { return _dpiPort.current(); }
 	[[nodiscard]] const QString &dpiStrategy() const { return _dpiStrategy.current(); }
 
+	// Опции стелса со страницы прокси. Каждая пара checkbox:значение доезжает
+	// до ayu-dpi.exe как `--stealth KEY=VALUE`, где ключ и значение совпадают
+	// со слагами ayu-core::dpi::stealth. Хранится то, что видит пользователь, а
+	// перевод в словарь процесса делает ayu_dpi.cpp в одном месте.
+	//
+	// Транспорт ("Route via WSS") отдельным полем не дублируется: это уже
+	// dpiUseWebSocket, и bringUp отправляет его флагом `--ws`, а не ключом
+	// `--stealth transport=`: ключ transport уходит только в stealth_report.
+	//
+	// Профиль ClientHello хранится числом в порядке ProxyTlsProfile из
+	// proxy_data.h: 0 Auto, 1 Firefox, 2 AndroidChrome, 3 Yandex,
+	// 4 FirefoxAndroid, 5 AndroidOkHttp, 6 AutoRotate, 7 ChromeModern.
+	[[nodiscard]] bool dpiStealthFragmentClientHello() const { return _dpiStealthFragmentClientHello.current(); }
+	[[nodiscard]] bool dpiStealthSpreadConnections() const { return _dpiStealthSpreadConnections.current(); }
+	[[nodiscard]] bool dpiStealthMaskStart() const { return _dpiStealthMaskStart.current(); }
+	[[nodiscard]] bool dpiStealthVaryRecordSizes() const { return _dpiStealthVaryRecordSizes.current(); }
+	[[nodiscard]] bool dpiStealthPaceTraffic() const { return _dpiStealthPaceTraffic.current(); }
+	[[nodiscard]] bool dpiStealthSyntheticPsk() const { return _dpiStealthSyntheticPsk.current(); }
+	[[nodiscard]] int dpiStealthTlsProfile() const { return _dpiStealthTlsProfile.current(); }
+
+	// Пользовательский WSS-релей: адрес, порт, путь запроса и имя для проверки
+	// сертификата. Пустые host/path/domain и нулевой порт означают официальный
+	// фронт Telegram: официальные значения подставляет ayu-dpi, а не клиент,
+	// потому что они зависят от дата-центра, который известен только процессу.
+	[[nodiscard]] const QString &dpiStealthWssHost() const { return _dpiStealthWssHost.current(); }
+	[[nodiscard]] int dpiStealthWssPort() const { return _dpiStealthWssPort.current(); }
+	[[nodiscard]] const QString &dpiStealthWssPath() const { return _dpiStealthWssPath.current(); }
+	[[nodiscard]] const QString &dpiStealthWssDomain() const { return _dpiStealthWssDomain.current(); }
+
+	// Автопорог батареи для Power Saving: процент заряда, ниже которого режим
+	// включается сам. 0 значит "никогда", как в бете (`LiteMode.LowPower`).
+	// Источник значения - ползунок в Ayu-секции настроек
+	// (ayu/ui/settings/settings_general.cpp, BuildPowerSavingThreshold), а сама
+	// проверка - Ayu::Power::ShouldEnable (мост в Rust, ayu/ayu_power.h).
+	[[nodiscard]] int powerSavingLowPowerThreshold() const { return _powerSavingLowPowerThreshold.current(); }
+	[[nodiscard]] rpl::producer<int> powerSavingLowPowerThresholdValue() const { return _powerSavingLowPowerThreshold.value(); }
+
 	void setSaveDeletedMessages(bool val);
 	void setSaveMessagesHistory(bool val);
 	void setSaveForBots(bool val);
@@ -456,9 +493,34 @@ public:
 	void setDpiUseWebSocket(bool val);
 	void setDpiPort(int val);
 	void setDpiStrategy(const QString &val);
+	void setDpiStealthFragmentClientHello(bool val);
+	void setDpiStealthSpreadConnections(bool val);
+	void setDpiStealthMaskStart(bool val);
+	void setDpiStealthVaryRecordSizes(bool val);
+	void setDpiStealthPaceTraffic(bool val);
+	void setDpiStealthSyntheticPsk(bool val);
+	void setDpiStealthTlsProfile(int val);
+	void setDpiStealthWssHost(const QString &val);
+	void setDpiStealthWssPort(int val);
+	void setDpiStealthWssPath(const QString &val);
+	void setDpiStealthWssDomain(const QString &val);
+
+	// Записывает все четыре поля пользовательского WSS-релея одним действием и
+	// перезапускает обход ровно один раз (порт зажимается в 0..65535). Четыре
+	// отдельных сеттера дёргали restartFromSettings каждый, поэтому правка
+	// нескольких полей в одном залпе давала каскад синхронных перезапусков
+	// процесса ayu-dpi и заметный фриз UI.
+	void setDpiStealthWss(
+		const QString &host,
+		int port,
+		const QString &path,
+		const QString &domain);
+
+	void setPowerSavingLowPowerThreshold(int val);
 
 	[[nodiscard]] rpl::producer<bool> useGlobalGhostModeValue() const { return _useGlobalGhostMode.value(); }
 	[[nodiscard]] rpl::producer<bool> useGlobalGhostModeChanges() const { return _useGlobalGhostMode.changes(); }
+	[[nodiscard]] rpl::producer<int> powerSavingLowPowerThresholdChanges() const { return _powerSavingLowPowerThreshold.changes(); }
 	[[nodiscard]] rpl::producer<bool> saveDeletedMessagesValue() const { return _saveDeletedMessages.value(); }
 	[[nodiscard]] rpl::producer<bool> saveDeletedMessagesChanges() const { return _saveDeletedMessages.changes(); }
 	[[nodiscard]] rpl::producer<bool> saveMessagesHistoryValue() const { return _saveMessagesHistory.value(); }
@@ -735,6 +797,21 @@ private:
 	rpl::variable<bool> _dpiUseWebSocket = false;
 	rpl::variable<int> _dpiPort = 1080;
 	rpl::variable<QString> _dpiStrategy;
+
+	rpl::variable<bool> _dpiStealthFragmentClientHello = false;
+	rpl::variable<bool> _dpiStealthSpreadConnections = false;
+	rpl::variable<bool> _dpiStealthMaskStart = false;
+	rpl::variable<bool> _dpiStealthVaryRecordSizes = false;
+	rpl::variable<bool> _dpiStealthPaceTraffic = false;
+	rpl::variable<bool> _dpiStealthSyntheticPsk = false;
+	rpl::variable<int> _dpiStealthTlsProfile = 0;
+	rpl::variable<QString> _dpiStealthWssHost;
+	rpl::variable<int> _dpiStealthWssPort = 0;
+	rpl::variable<QString> _dpiStealthWssPath;
+	rpl::variable<QString> _dpiStealthWssDomain;
+
+	// 0 значит "никогда" (как в бете), 1..100 - процент заряда.
+	rpl::variable<int> _powerSavingLowPowerThreshold = 0;
 
 	rpl::variable<bool> _useGlobalGhostMode = true;
 	std::map<uint64, std::unique_ptr<GhostModeAccountSettings>> _ghostAccounts;

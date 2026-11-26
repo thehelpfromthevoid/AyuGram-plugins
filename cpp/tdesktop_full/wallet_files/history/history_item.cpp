@@ -16,6 +16,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_message.h"
 #include "history/view/history_view_service_message.h"
 #include "history/view/media/history_view_media_grouped.h"
+#include "history/history_gift_onchain_offer.h"
+#include "history/history_item_bot_invite.h"
 #include "history/history_item_components.h"
 #include "history/history_item_helpers.h"
 #include "history/history_unread_things.h"
@@ -456,6 +458,9 @@ std::unique_ptr<Data::Media> HistoryItem::CreateMedia(
 			Data::ComputeInvoiceData(item, media));
 	}, [](const MTPDmessageMediaVideoStream &) -> Result {
 		// Live stories.
+		return nullptr;
+	}, [](const MTPDmessageMediaWidget &) -> Result {
+		// No bot widget rendering in this fork.
 		return nullptr;
 	}, [](const MTPDmessageMediaEmpty &) -> Result {
 		return nullptr;
@@ -5770,6 +5775,11 @@ void HistoryItem::createServiceFromMtp(const MTPDmessageService &message) {
 				}, added->lifetime);
 			}
 		}
+	} else if (type == mtpc_messageActionStarGiftOnchainOffer) {
+		UpdateComponents(HistoryServiceGiftOnchainOffer::Bit());
+		FillGiftOnchainOffer(
+			this,
+			action.c_messageActionStarGiftOnchainOffer());
 	}
 	if (const auto replyTo = message.vreply_to()) {
 		replyTo->match([&](const MTPDmessageReplyHeader &data) {
@@ -7578,20 +7588,42 @@ void HistoryItem::setServiceMessageByAction(const MTPmessageAction &action) {
 		auto result = PreparedServiceText();
 		const auto amount = CreditsAmountFromTL(
 			MTP_starsTonAmount(action.vamount()));
-		result.links.push_back(fromLink());
 		auto open = Ui::Text::Wrapped(
 			{ tr::lng_action_gram_transfer_open(tr::now) },
 			EntityType::CustomUrl,
 			u"tg://ton"_q);
-		result.text = tr::lng_action_gram_transfer(
-			tr::now,
-			lt_from,
-			fromLinkText(),
-			lt_amount,
-			tr::marked(PrepareCreditsAmountText(amount)),
-			lt_link,
-			std::move(open),
-			tr::marked);
+		// The sender is the current user, a known sender or an anonymous
+		// service user; the same two flags the gift messages use pick the
+		// sentence, matching Chat.Service[Item].GramTransferYou, .GramTransfer
+		// and .GramTransferUnknown of the beta.
+		if (_from->isSelf()) {
+			result.text = tr::lng_action_gram_transfer_you(
+				tr::now,
+				lt_amount,
+				tr::marked(PrepareCreditsAmountText(amount)),
+				lt_link,
+				std::move(open),
+				tr::marked);
+		} else if (_from->isServiceUser()) {
+			result.text = tr::lng_action_gram_transfer_anonymous(
+				tr::now,
+				lt_amount,
+				tr::marked(PrepareCreditsAmountText(amount)),
+				lt_link,
+				std::move(open),
+				tr::marked);
+		} else {
+			result.links.push_back(fromLink());
+			result.text = tr::lng_action_gram_transfer(
+				tr::now,
+				lt_from,
+				fromLinkText(),
+				lt_amount,
+				tr::marked(PrepareCreditsAmountText(amount)),
+				lt_link,
+				std::move(open),
+				tr::marked);
+		}
 		return result;
 	};
 
@@ -7676,6 +7708,38 @@ void HistoryItem::setServiceMessageByAction(const MTPmessageAction &action) {
 		return result;
 	};
 
+	auto prepareBotInvite = [this](const MTPDmessageActionBotInvite &action) {
+		const auto sender = _from->asUser();
+		return PrepareBotInviteText(
+			_history->owner().user(action.vinviter_id().v),
+			sender && sender->isBot(),
+			fromLinkText(),
+			fromLink());
+	};
+
+	auto prepareNoPaidMessagesTokenUsed = [this](
+			const MTPDmessageActionNoPaidMessagesTokenUsed &) {
+		auto result = PreparedServiceText();
+		if (out()) {
+			result.text = tr::lng_action_you_no_paid_token_used(
+				tr::now,
+				tr::marked);
+		} else {
+			result.links.push_back(fromLink());
+			result.text = tr::lng_action_no_paid_token_used(
+				tr::now,
+				lt_from,
+				fromLinkText(), // Link 1.
+				tr::marked);
+		}
+		return result;
+	};
+
+	auto prepareStarGiftOnchainOffer = [this](
+			const MTPDmessageActionStarGiftOnchainOffer &) {
+		return PrepareGiftOnchainOfferText(this);
+	};
+
 	setServiceText(action.match(
 		prepareChatAddUserText,
 		prepareChatJoinedByLink,
@@ -7748,6 +7812,9 @@ void HistoryItem::setServiceMessageByAction(const MTPmessageAction &action) {
 		prepareCommunityJoined,
 		prepareGramTransfer,
 		prepareWalletConnectRequest,
+		prepareNoPaidMessagesTokenUsed,
+		prepareStarGiftOnchainOffer,
+		prepareBotInvite,
 		PrepareErrorText<MTPDmessageActionEmpty>));
 
 	processAction(action);
@@ -8054,6 +8121,19 @@ void HistoryItem::processAction(const MTPMessageAction &action) {
 					.type = Data::GiftType::GiftOffer,
 				});
 		}
+	}, [&](const MTPDmessageActionStarGiftOnchainOffer &) {
+		_media = CreateGiftOnchainOfferMedia(this);
+	}, [&](const MTPDmessageActionGramTransfer &data) {
+		const auto comment = data.vcomment()
+			? TextWithEntities::Simple(qs(*data.vcomment()))
+			: TextWithEntities();
+		_media = std::make_unique<Data::MediaGramTransfer>(
+			this,
+			data.vamount().v,
+			qs(data.vpeer_address()),
+			qs(data.vtransaction_id()),
+			comment,
+			data.is_comment_encrypted());
 	}, [](const auto &) {
 	});
 }

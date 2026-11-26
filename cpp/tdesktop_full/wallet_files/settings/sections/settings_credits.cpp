@@ -13,12 +13,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "api/api_statistics.h"
 #include "base/call_delayed.h"
 #include "base/invoke_queued.h"
+#include "base/unixtime.h"
 #include "boxes/gift_credits_box.h"
 #include "boxes/gift_premium_box.h"
 #include "boxes/star_gift_box.h"
 #include "chat_helpers/stickers_gift_box_pack.h"
 #include "core/click_handler_types.h"
 #include "data/components/credits.h"
+#include "boxes/wallet_send_box.h"
+#include "data/components/wallet.h"
 #include "data/data_file_origin.h"
 #include "data/data_photo_media.h"
 #include "data/data_session.h"
@@ -34,6 +37,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/settings/info_settings_widget.h"
 #include "info/statistics/info_statistics_list_controllers.h"
 #include "lang/lang_keys.h"
+#include "lang/lang_tag.h"
 #include "main/main_session.h"
 #include "settings/sections/settings_main.h"
 #include "settings/settings_builder.h"
@@ -44,6 +48,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/boxes/boost_box.h"
 #include "ui/controls/swipe_handler.h"
 #include "ui/controls/swipe_handler_data.h"
+#include "ui/controls/table_rows.h"
 #include "ui/effects/animation_value_f.h"
 #include "ui/effects/credits_graphics.h"
 #include "ui/effects/premium_graphics.h"
@@ -61,6 +66,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/sliding_tabs.h"
 #include "ui/wrap/fade_wrap.h"
 #include "ui/wrap/slide_wrap.h"
+#include "ui/wrap/table_layout.h"
 #include "ui/wrap/vertical_layout.h"
 #include "window/window_session_controller.h"
 #include "styles/style_chat.h"
@@ -72,6 +78,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "styles/style_settings.h"
 #include "styles/style_menu_icons.h"
 #include "styles/style_channel_earn.h"
+
+#include <QtGui/QClipboard>
+#include <QtGui/QGuiApplication>
 
 namespace Settings {
 namespace {
@@ -932,11 +941,223 @@ void BuildCurrencyWithdrawalSection(
 	}, *apiLifetime);
 }
 
+void ShowWalletCollectibleBox(
+		not_null<Ui::GenericBox*> box,
+		not_null<Window::SessionController*> controller,
+		Data::WalletNft nft) {
+	const auto session = &controller->session();
+	box->setStyle(st::giveawayGiftCodeBox);
+	box->setNoContentMargin(true);
+	box->setWidth(st::boxWideWidth);
+	box->setTitle(tr::lng_wallet_controller_collectibles());
+
+	const auto content = box->verticalLayout();
+	Ui::AddSkip(content);
+
+	if (!nft.name.isEmpty()) {
+		const auto name = content->add(
+			object_ptr<Ui::FlatLabel>(
+				content,
+				rpl::single(nft.name),
+				st::defaultFlatLabel),
+			st::boxRowPadding,
+			style::al_top);
+		name->setSelectable(true);
+		Ui::AddSkip(content);
+		Ui::AddSkip(content);
+	}
+
+	const auto table = content->add(
+		object_ptr<Ui::TableLayout>(
+			content,
+			st::giveawayGiftCodeTable),
+		st::giveawayGiftCodeTableMargin);
+
+	const auto addRow = [&](
+			rpl::producer<QString> label,
+			const QString &value) {
+		if (value.isEmpty()) {
+			return;
+		}
+		Ui::AddTableRow(
+			table,
+			std::move(label),
+			rpl::single(Ui::Text::WithEntities(value)));
+	};
+
+	addRow(
+		tr::lng_wallet_collectible_details_controller_collection(),
+		nft.collectionAddress);
+	addRow(
+		tr::lng_wallet_collectible_details_controller_address(),
+		nft.address);
+	addRow(
+		tr::lng_wallet_collectible_details_controller_owner(),
+		nft.ownerAddress);
+	if (!nft.description.isEmpty()) {
+		addRow(
+			tr::lng_wallet_transaction_controller_encrypted_comment(),
+			nft.description);
+	}
+	for (const auto &attribute : nft.attributes) {
+		addRow(
+			rpl::single(attribute.traitType),
+			attribute.value);
+	}
+
+	Ui::AddSkip(content);
+	Ui::AddSkip(content);
+
+	if (!nft.address.isEmpty()) {
+		const auto explorer = content->add(
+			object_ptr<Ui::RoundButton>(
+				content,
+				tr::lng_wallet_transaction_controller_view_in_explorer(),
+				st::defaultLightButton),
+			st::boxRowPadding,
+			style::al_top);
+		explorer->setClickedCallback([=] {
+			UrlClickHandler::Open(TonAddressUrl(session, nft.address));
+		});
+	}
+
+	box->addButton(tr::lng_wallet_collectible_details_controller_ok(), [=] {
+		box->closeBox();
+	});
+}
+
+void ShowWalletTransactionBox(
+		not_null<Ui::GenericBox*> box,
+		not_null<Window::SessionController*> controller,
+		Data::WalletTransaction t) {
+	const auto session = &controller->session();
+	box->setStyle(st::giveawayGiftCodeBox);
+	box->setNoContentMargin(true);
+	box->setWidth(st::boxWideWidth);
+	box->setTitle(tr::lng_wallet_transaction_controller_transaction());
+
+	const auto content = box->verticalLayout();
+	Ui::AddSkip(content);
+
+	const auto gram = tr::lng_wallet_amount_row_item_gram(tr::now);
+	const auto amountText = (t.incoming ? QString() : u"-"_q)
+		+ Lang::FormatCreditsAmountDecimal(t.amount.abs())
+		+ u" "_q
+		+ gram;
+	const auto amount = content->add(
+		object_ptr<Ui::FlatLabel>(
+			content,
+			rpl::single(amountText),
+			st::defaultFlatLabel),
+		st::boxRowPadding,
+		style::al_top);
+	amount->setSelectable(true);
+
+	Ui::AddSkip(content);
+	Ui::AddSkip(content);
+
+	const auto table = content->add(
+		object_ptr<Ui::TableLayout>(
+			content,
+			st::giveawayGiftCodeTable),
+		st::giveawayGiftCodeTableMargin);
+
+	auto peerName = QString();
+	if (!t.peer.providerName.isEmpty()) {
+		peerName = t.peer.providerName;
+	} else if (!t.peer.domain.isEmpty()) {
+		peerName = t.peer.domain;
+	} else if (!t.peer.address.isEmpty()) {
+		peerName = t.peer.address;
+	}
+	const auto addRow = [&](
+			rpl::producer<QString> label,
+			const QString &value) {
+		Ui::AddTableRow(
+			table,
+			std::move(label),
+			rpl::single(Ui::Text::WithEntities(value)));
+	};
+
+	addRow(
+		t.incoming
+			? tr::lng_wallet_transaction_controller_sender()
+			: tr::lng_wallet_transaction_controller_recipient(),
+		peerName.isEmpty()
+			? tr::lng_wallet_transaction_controller_unknown_address(tr::now)
+			: peerName);
+	if (!t.peer.address.isEmpty() && t.peer.address != peerName) {
+		addRow(
+			tr::lng_wallet_transaction_controller_address(),
+			t.peer.address);
+	}
+	if (t.date) {
+		addRow(
+			tr::lng_wallet_transaction_controller_date(),
+			Ui::FormatDateTime(base::unixtime::parse(t.date)));
+	}
+	if (t.gasless) {
+		addRow(
+			tr::lng_wallet_transaction_controller_network_fee(),
+			tr::lng_wallet_transaction_controller_fee_free(tr::now));
+	} else if (!t.fee.empty()) {
+		addRow(
+			tr::lng_wallet_transaction_controller_fee(),
+			Lang::FormatCreditsAmountDecimal(t.fee.abs())
+				+ u" "_q
+				+ gram);
+	}
+	if (!t.comment.isEmpty()) {
+		addRow(
+			t.commentEncrypted
+				? tr::lng_wallet_transaction_controller_encrypted_comment()
+				: tr::lng_photos_comment(),
+			t.comment);
+	}
+	if (t.nft) {
+		addRow(
+			tr::lng_wallet_transaction_controller_nft(),
+			t.nft->name.isEmpty()
+				? tr::lng_wallet_transaction_controller_collectible_gift(
+					tr::now)
+				: t.nft->name);
+	}
+	if (t.keyChange) {
+		addRow(
+			tr::lng_wallet_transaction_key_update_row_item_title(),
+			tr::lng_wallet_transaction_key_update_row_item_title(tr::now));
+	}
+
+	Ui::AddSkip(content);
+	Ui::AddSkip(content);
+
+	if (!t.txHash.isEmpty()) {
+		const auto explorer = content->add(
+			object_ptr<Ui::RoundButton>(
+				content,
+				tr::lng_wallet_transaction_controller_view_in_explorer(),
+				st::defaultLightButton),
+			st::boxRowPadding,
+			style::al_top);
+		explorer->setClickedCallback([=] {
+			UrlClickHandler::Open(TonAddressUrl(session, t.txHash));
+		});
+	}
+
+	box->addButton(tr::lng_wallet_transaction_controller_ok(), [=] {
+		box->closeBox();
+	});
+}
+
 void BuildWalletSection(
 		not_null<Ui::VerticalLayout*> content,
 		not_null<Window::SessionController*> controller) {
-	const auto credits = &controller->session().credits();
+	const auto session = &controller->session();
+	const auto credits = &session->credits();
+	const auto wallet = &session->wallet();
 	credits->walletLoad();
+	wallet->loadTransactions();
+	wallet->loadNfts();
 
 	const auto wrap = content->add(
 		object_ptr<Ui::SlideWrap<Ui::VerticalLayout>>(
@@ -945,6 +1166,21 @@ void BuildWalletSection(
 	const auto inner = wrap->entity();
 	wrap->toggle(false, anim::type::instant);
 
+	Ui::AddSkip(inner);
+	Ui::AddSubsectionTitle(inner, tr::lng_wallet_controller_money());
+
+	const auto balance = inner->add(
+		object_ptr<Ui::FlatLabel>(
+			inner,
+			credits->tonBalanceValue() | rpl::map([](CreditsAmount c) {
+				return Lang::FormatCreditsAmountDecimal(c)
+					+ u" "_q
+					+ tr::lng_wallet_amount_row_item_gram(tr::now);
+			}),
+			st::defaultFlatLabel),
+		st::boxRowPadding,
+		style::al_top);
+	balance->setSelectable(true);
 	Ui::AddSkip(inner);
 	Ui::AddSubsectionTitle(inner, tr::lng_wallet_address_title());
 	Ui::AddSkip(inner);
@@ -959,6 +1195,33 @@ void BuildWalletSection(
 	address->setSelectable(true);
 
 	Ui::AddSkip(inner);
+
+	const auto copy = inner->add(
+		object_ptr<Ui::RoundButton>(
+			inner,
+			tr::lng_wallet_address_copy(),
+			st::defaultLightButton),
+		st::boxRowPadding,
+		style::al_top);
+	copy->setClickedCallback([=] {
+		const auto current = credits->walletAddress();
+		if (current.isEmpty()) {
+			return;
+		}
+		QGuiApplication::clipboard()->setText(current);
+		controller->showToast(tr::lng_wallet_format_address_copied(tr::now));
+	});
+
+	const auto send = inner->add(
+		object_ptr<Ui::RoundButton>(
+			inner,
+			tr::lng_wallet_controller_send(),
+			st::defaultLightButton),
+		st::boxRowPadding,
+		style::al_top);
+	send->setClickedCallback([=] {
+		Ui::ShowWalletSendBox(controller);
+	});
 
 	const auto qr = inner->add(
 		object_ptr<Ui::RoundButton>(
@@ -981,6 +1244,256 @@ void BuildWalletSection(
 	Ui::AddSkip(inner);
 	Ui::AddSkip(inner);
 
+	Ui::AddSubsectionTitle(inner, tr::lng_wallet_controller_transactions());
+
+	const auto transactions = inner->add(
+		object_ptr<Ui::VerticalLayout>(inner));
+
+	const auto addTransaction = [=](const Data::WalletTransaction &t) {
+		auto peerName = QString();
+		if (!t.peer.providerName.isEmpty()) {
+			peerName = t.peer.providerName;
+		} else if (!t.peer.domain.isEmpty()) {
+			peerName = t.peer.domain;
+		} else if (!t.peer.address.isEmpty()) {
+			peerName = t.peer.address;
+		}
+		const auto title = t.failed
+			? tr::lng_wallet_transaction_row_item_failed(tr::now)
+			: t.keyChange
+			? tr::lng_wallet_transaction_row_item_key_update(tr::now)
+			: t.nft
+			? (!t.nft->name.isEmpty()
+				? t.nft->name
+				: tr::lng_wallet_transaction_row_item_collectible_gift(
+					tr::now))
+			: (t.peer.type == Data::WalletTransactionPeerType::TelegramGift)
+			? tr::lng_wallet_transaction_row_item_telegram(tr::now)
+			: (t.peer.type == Data::WalletTransactionPeerType::OnchainGift)
+			? tr::lng_wallet_transaction_row_item_on_chain_gift(tr::now)
+			: !peerName.isEmpty()
+			? peerName
+			: (t.incoming
+				? tr::lng_wallet_transaction_row_item_received(tr::now)
+				: tr::lng_wallet_transaction_row_item_sent(tr::now));
+		const auto label = (t.suspectedSpam
+				? tr::lng_scam_badge(tr::now) + u" "_q
+				: QString())
+			+ (t.incoming ? QString() : u"-"_q)
+			+ Lang::FormatCreditsAmountDecimal(t.amount.abs())
+			+ u" "_q
+			+ tr::lng_wallet_amount_row_item_gram(tr::now);
+		const auto button = AddButtonWithLabel(
+			transactions,
+			rpl::single(title),
+			rpl::single(label),
+			st::defaultSettingsButton,
+			{ &st::menuIconTon });
+		button->setClickedCallback([=] {
+			controller->uiShow()->show(Box(
+				ShowWalletTransactionBox,
+				controller,
+				t));
+		});
+	};
+
+	const auto rebuildTransactions = [=] {
+		while (transactions->count()) {
+			delete transactions->widgetAt(0);
+		}
+		const auto state = wallet->transactionsState();
+		if (state == Data::WalletTransactionsState::Failed) {
+			transactions->add(
+				object_ptr<Ui::FlatLabel>(
+					transactions,
+					tr::lng_wallet_transactions_failed(),
+					st::defaultFlatLabel),
+				st::boxRowPadding,
+				style::al_top);
+			Ui::AddSkip(transactions);
+			const auto retry = transactions->add(
+				object_ptr<Ui::RoundButton>(
+					transactions,
+					tr::lng_wallet_transactions_retry(),
+					st::defaultLightButton),
+				st::boxRowPadding,
+				style::al_top);
+			retry->setClickedCallback([=] {
+				wallet->retryTransactions();
+			});
+			return;
+		}
+		const auto &list = wallet->transactions();
+		if (list.empty()) {
+			transactions->add(
+				object_ptr<Ui::FlatLabel>(
+					transactions,
+					(state == Data::WalletTransactionsState::Loading)
+						? tr::lng_wallet_controller_still_syncing()
+						: tr::lng_wallet_transactions_empty(),
+					st::defaultFlatLabel),
+				st::boxRowPadding,
+				style::al_top);
+			return;
+		}
+		for (const auto &t : list) {
+			addTransaction(t);
+		}
+		if (wallet->hasMoreTransactions()) {
+			const auto more = transactions->add(
+				object_ptr<Ui::RoundButton>(
+					transactions,
+					tr::lng_wallet_load_more_row_item_show_more(),
+					st::defaultLightButton),
+				st::boxRowPadding,
+				style::al_top);
+			more->setClickedCallback([=] {
+				wallet->loadMoreTransactions();
+			});
+		}
+	};
+	wallet->transactionsValue(
+	) | rpl::on_next([=](const std::vector<Data::WalletTransaction> &) {
+		rebuildTransactions();
+	}, wrap->lifetime());
+	wallet->hasMoreTransactionsValue(
+	) | rpl::on_next([=](bool) {
+		rebuildTransactions();
+	}, wrap->lifetime());
+	wallet->transactionsStateValue(
+	) | rpl::on_next([=](Data::WalletTransactionsState) {
+		rebuildTransactions();
+	}, wrap->lifetime());
+	rebuildTransactions();
+
+	Ui::AddSkip(inner);
+	Ui::AddSkip(inner);
+
+	Ui::AddSubsectionTitle(inner, tr::lng_wallet_controller_collectibles());
+
+	const auto collectibles = inner->add(
+		object_ptr<Ui::VerticalLayout>(inner));
+	const auto rebuildCollectibles = [=] {
+		while (collectibles->count()) {
+			delete collectibles->widgetAt(0);
+		}
+		const auto &list = wallet->nfts();
+		for (const auto &nft : list) {
+			const auto title = !nft.name.isEmpty()
+				? nft.name
+				: !nft.index.isEmpty()
+				? nft.index
+				: nft.address;
+			const auto button = AddButtonWithLabel(
+				collectibles,
+				rpl::single(title),
+				rpl::single(nft.collectionAddress),
+				st::defaultSettingsButton,
+				{ &st::menuIconTon });
+			button->setClickedCallback([=] {
+				controller->uiShow()->show(Box(
+					ShowWalletCollectibleBox,
+					controller,
+					nft));
+			});
+		}
+		if (wallet->hasMoreNfts()) {
+			const auto more = collectibles->add(
+				object_ptr<Ui::RoundButton>(
+					collectibles,
+					tr::lng_wallet_load_more_row_item_show_more(),
+					st::defaultLightButton),
+				st::boxRowPadding,
+				style::al_top);
+			more->setClickedCallback([=] {
+				wallet->loadMoreNfts();
+			});
+		}
+	};
+	wallet->nftsValue(
+	) | rpl::on_next([=](const std::vector<Data::WalletNft> &) {
+		rebuildCollectibles();
+	}, wrap->lifetime());
+	wallet->hasMoreNftsValue(
+	) | rpl::on_next([=](bool) {
+		rebuildCollectibles();
+	}, wrap->lifetime());
+	rebuildCollectibles();
+
+	Ui::AddSkip(inner);
+	Ui::AddSkip(inner);
+
+	Ui::AddSubsectionTitle(inner, tr::lng_wallet_controller_keys_and_backup());
+
+	const auto backup = inner->add(
+		object_ptr<Ui::FlatLabel>(
+			inner,
+			wallet->stateValue() | rpl::map([](const Data::WalletState &s) {
+				return s.backupEnabled
+					? tr::lng_wallet_settings_controller_backup_enabled(
+						tr::now)
+					: tr::lng_wallet_settings_controller_backup_disabled(
+						tr::now);
+			}),
+			st::defaultFlatLabel),
+		st::boxRowPadding,
+		style::al_top);
+	backup->setSelectable(true);
+
+	Ui::AddSkip(inner);
+	Ui::AddSkip(inner);
+
+	Ui::AddSubsectionTitle(inner, tr::lng_wallet_connected_apps_controller_title());
+
+	const auto apps = inner->add(
+		object_ptr<Ui::VerticalLayout>(inner));
+	const auto rebuildApps = [=] {
+		while (apps->count()) {
+			delete apps->widgetAt(0);
+		}
+		const auto &list = wallet->tonConnectSessions();
+		if (list.empty()) {
+			apps->add(
+				object_ptr<Ui::FlatLabel>(
+					apps,
+					tr::lng_wallet_connected_apps_controller_footer(),
+					st::defaultFlatLabel),
+				st::boxRowPadding,
+				style::al_top);
+			return;
+		}
+		for (const auto &s : list) {
+			const auto name = s.manifest.name.isEmpty()
+				? tr::lng_wallet_connected_apps_controller_title(tr::now)
+				: s.manifest.name;
+			const auto id = s.id;
+			AddButtonWithLabel(
+				apps,
+				rpl::single(name),
+				rpl::single(Ui::FormatDateTime(base::unixtime::parse(s.date))),
+				st::defaultSettingsButton,
+				{ &st::menuIconTon });
+			const auto disconnect = apps->add(
+				object_ptr<Ui::RoundButton>(
+					apps,
+					tr::lng_wallet_connected_apps_controller_disconnect(),
+					st::defaultLightButton),
+				st::boxRowPadding,
+				style::al_top);
+			disconnect->setClickedCallback([=] {
+				wallet->disconnectTonConnectSession(id);
+			});
+		}
+	};
+	wallet->tonConnectSessionsValue(
+	) | rpl::on_next([=](const std::vector<Data::WalletTonConnectSession> &) {
+		rebuildApps();
+	}, wrap->lifetime());
+	rebuildApps();
+
+	Ui::AddSkip(inner);
+	Ui::AddSkip(inner);
+
 	const auto fill = [=] {
 		const auto loaded = credits->walletLoaded();
 		const auto has = credits->walletExists();
@@ -993,6 +1506,7 @@ void BuildWalletSection(
 			: tr::lng_wallet_address_empty(tr::now));
 		address->setVisible(true);
 		qr->setVisible(has);
+		copy->setVisible(has);
 		content->resizeToWidth(content->width());
 	};
 	credits->walletLoadedValue(

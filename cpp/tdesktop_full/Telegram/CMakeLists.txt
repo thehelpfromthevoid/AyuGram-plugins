@@ -44,6 +44,7 @@ include(cmake/td_ui.cmake)
 include(cmake/td_webauthn.cmake)
 include(cmake/telegram_apple_swift_runtime.cmake)
 include(cmake/generate_appstream_changelog.cmake)
+include(cmake/td_rust.cmake)
 
 if (DESKTOP_APP_TEST_APPS)
     include(cmake/tests.cmake)
@@ -99,6 +100,9 @@ PRIVATE
 
     # AyuGram filters
     ayugram::lib_icu
+
+    # AyuGram Rust fast layer (staticlib built from rust/ with the static CRT)
+    ayu_rust
 )
 
 set(ayugram_files
@@ -114,6 +118,10 @@ set(ayugram_files
         ayu/ayu_lang.h
         ayu/ayu_infra.cpp
         ayu/ayu_infra.h
+        ayu/ayu_power.cpp
+        ayu/ayu_power.h
+        ayu/ayu_wallet.cpp
+        ayu/ayu_wallet.h
         ayu/features/dpi/ayu_dpi.cpp
         ayu/features/dpi/ayu_dpi.h
         ayu/restart_guard.cpp
@@ -625,6 +633,12 @@ PRIVATE
     boxes/url_auth_box.h
     boxes/username_box.cpp
     boxes/username_box.h
+    boxes/wallet_info_box.cpp
+    boxes/wallet_info_box.h
+    boxes/wallet_send_box.cpp
+    boxes/wallet_send_box.h
+    boxes/wallet_settings_box.cpp
+    boxes/wallet_settings_box.h
     calls/group/calls_choose_join_as.cpp
     calls/group/calls_choose_join_as.h
     calls/group/calls_cover_item.cpp
@@ -813,6 +827,8 @@ PRIVATE
     data/business/data_shortcut_messages.h
     data/components/credits.cpp
     data/components/credits.h
+    data/components/wallet.cpp
+    data/components/wallet.h
     data/components/ephemeral_messages.cpp
     data/components/ephemeral_messages.h
     data/components/factchecks.cpp
@@ -1324,6 +1340,10 @@ PRIVATE
     history/history_item_components.h
     history/history_item_edition.cpp
     history/history_item_edition.h
+    history/history_gift_onchain_offer.cpp
+    history/history_gift_onchain_offer.h
+    history/history_item_bot_invite.cpp
+    history/history_item_bot_invite.h
     history/history_item_helpers.cpp
     history/history_item_helpers.h
     history/history_item_reply_markup.cpp

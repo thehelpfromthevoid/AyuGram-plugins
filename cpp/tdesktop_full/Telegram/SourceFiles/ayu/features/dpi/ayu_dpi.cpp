@@ -5,8 +5,10 @@
 //
 // Copyright @Radolyn, 2026
 #include "ayu/features/dpi/ayu_dpi.h"
+#include "ayu/features/dpi/ayu_dpi_state.h"
 
 #include "ayu/ayu_settings.h"
+#include "base/debug_log.h"
 #include "core/application.h"
 #include "settings.h"
 
@@ -16,6 +18,8 @@
 #include <QtCore/QProcess>
 #include <QtCore/QStringList>
 #include <QtNetwork/QTcpSocket>
+
+#include <array>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -47,6 +51,14 @@ constexpr auto kDefaultStrategy = "--filter-tcp=443"
 QString g_error;
 qint64 g_pid = 0;
 bool g_applied = false;
+
+// Где лежит запись владения портом. Рядом с рабочим каталогом клиента, чтобы
+// находить собственного отцепившегося прокси, а не только что поднятого в
+// этом процессе.
+[[nodiscard]] std::filesystem::path OwnershipPath() {
+	const auto path = QDir(cWorkingDir()).filePath(u"ayu-dpi.port"_q);
+	return std::filesystem::path(path.toStdWString());
+}
 
 [[nodiscard]] bool ProcessAlive(qint64 pid) {
 #ifdef Q_OS_WIN
@@ -86,6 +98,44 @@ void TerminateProcessById(qint64 pid) {
 #else
 	Q_UNUSED(pid);
 #endif
+}
+
+// Полный путь к образу процесса. Нужен, чтобы отличить собственный
+// отцепившийся ayu-dpi.exe от чужого сервиса на том же порту, а не полагаться
+// на один лишь номер: номера переиспользуются системой.
+[[nodiscard]] QString ProcessImagePath(qint64 pid) {
+#ifdef Q_OS_WIN
+	if (pid <= 0) {
+		return QString();
+	}
+	const auto handle = OpenProcess(
+		PROCESS_QUERY_LIMITED_INFORMATION,
+		FALSE,
+		static_cast<DWORD>(pid));
+	if (!handle) {
+		return QString();
+	}
+	auto buffer = std::array<WCHAR, 1024>();
+	auto size = DWORD(buffer.size());
+	const auto ok = QueryFullProcessImageNameW(handle, 0, buffer.data(), &size);
+	CloseHandle(handle);
+	return ok ? QString::fromWCharArray(buffer.data(), static_cast<int>(size)) : QString();
+#else
+	Q_UNUSED(pid);
+	return QString();
+#endif
+}
+
+// Наш ли это прокси: имя процесса `ayu-dpi.exe` и каталог совпадают с
+// каталогом клиента. Проверка образа, а не одного номера, потому что по
+// номеру можно и переиспользовать чужой процесс, и погасить его на teardown.
+[[nodiscard]] bool IsOurProxy(qint64 pid) {
+	const auto image = ProcessImagePath(pid);
+	if (image.isEmpty()) {
+		return false;
+	}
+	const auto ours = QDir(cExeDir()).filePath(u"ayu-dpi.exe"_q);
+	return QFileInfo(image) == QFileInfo(ours);
 }
 
 // Ищет ayu-dpi.exe рядом с клиентом. Сборка кладёт его в тот же каталог, что и
@@ -138,6 +188,78 @@ void TerminateProcessById(qint64 pid) {
 	return proxy;
 }
 
+// Слагами опций владеет Rust (ayu-core::dpi::stealth), поэтому здесь только
+// имена, а не таблица трансляции значений. Число профиля приходит из настроек
+// в порядке ProxyTlsProfile из proxy_data.h.
+[[nodiscard]] QString TlsProfileSlug(int profile) {
+	switch (profile) {
+	case 1: return u"firefox"_q;
+	case 2: return u"android_chrome"_q;
+	case 3: return u"yandex"_q;
+	case 4: return u"firefox_android"_q;
+	case 5: return u"android_okhttp"_q;
+	case 6: return u"auto_rotate"_q;
+	case 7: return u"chrome_modern"_q;
+	default: return QString(); // 0 Auto и всё вне диапазона: пусть решает Rust
+	}
+}
+
+// Собирает `--stealth KEY=VALUE` из сохранённых тумблеров. Пустой список, когда
+// всё выключено: тогда аргументов нет вовсе, и процесс, который этих ключей ещё
+// не знает (старая сборка ayu-dpi.exe), продолжает работать как раньше. Ключ
+// отправляется, только если он что-то меняет от дефолта Rust, иначе это шум и
+// лишний способ уронить запуск на несовпадении версий.
+[[nodiscard]] QStringList StealthArguments(const AyuSettings &settings) {
+	auto out = QStringList();
+	const auto add = [&](const QString &key, const QString &value) {
+		out.push_back(u"--stealth"_q);
+		out.push_back(key + u"="_q + value);
+	};
+
+	if (settings.dpiStealthFragmentClientHello()) {
+		add(u"client_hello_fragmentation"_q, u"soft"_q);
+	}
+	if (settings.dpiStealthSpreadConnections()) {
+		add(u"connection_pattern"_q, u"soft"_q);
+	}
+	if (settings.dpiStealthMaskStart()) {
+		add(u"startup_cover"_q, u"soft"_q);
+	}
+	if (settings.dpiStealthVaryRecordSizes()) {
+		add(u"record_sizing"_q, u"conservative"_q);
+	}
+	if (settings.dpiStealthPaceTraffic()) {
+		add(u"timing"_q, u"gentle"_q);
+	}
+	if (settings.dpiStealthSyntheticPsk()) {
+		add(u"synthetic_psk"_q, u"on"_q);
+	}
+	const auto profile = TlsProfileSlug(settings.dpiStealthTlsProfile());
+	if (!profile.isEmpty()) {
+		add(u"tls_profile"_q, profile);
+	}
+	// Пользовательский релей отправляется, только когда он задан: пустые
+	// значения означали бы "официальный фронт", который и так дефолт Rust, а
+	// лишний ключ - это лишний способ не запуститься на несовпадении версий.
+	const auto wssHost = settings.dpiStealthWssHost().trimmed();
+	if (!wssHost.isEmpty()) {
+		add(u"wss_host"_q, wssHost);
+		const auto wssPort = settings.dpiStealthWssPort();
+		if (wssPort > 0) {
+			add(u"wss_port"_q, QString::number(wssPort));
+		}
+		const auto wssPath = settings.dpiStealthWssPath().trimmed();
+		if (!wssPath.isEmpty()) {
+			add(u"wss_path"_q, wssPath);
+		}
+		const auto wssDomain = settings.dpiStealthWssDomain().trimmed();
+		if (!wssDomain.isEmpty()) {
+			add(u"wss_domain"_q, wssDomain);
+		}
+	}
+	return out;
+}
+
 // Ждёт, пока на порту поднимется именно SOCKS5, либо пока процесс не умрёт.
 // Голый TCP-connect недостаточен: порт может принимать соединения раньше, чем
 // прокси начнёт отвечать, а чужой сервис на том же порту принял бы клиента.
@@ -161,18 +283,34 @@ void teardown() {
 		TerminateProcessById(g_pid);
 		g_pid = 0;
 	}
+	// Запись владения уходит вместе с процессом: оставленный файл заставил бы
+	// следующий запуск принять чужой сервис на этом порту за наш прокси.
+	State::Remove(OwnershipPath());
 	Core::App().setDpiProxyOverride(std::nullopt);
 	g_applied = false;
 }
 
 // Поднимает прокси и ставит переопределение. Возвращает успех.
 [[nodiscard]] bool bringUp(quint16 port, bool useWebSocket, const QString &strategy) {
-	// Порт уже слушает SOCKS5: это мог быть прокси, поднятый прошлым запуском
-	// клиента и переживший его. Переиспользуем, а не поднимаем второй.
+	// Порт уже слушает SOCKS5. Переиспользуем его только тогда, когда запись
+	// владения доказывает, что это наш отцепившийся прокси: любой локальный
+	// SOCKS5 отвечает тем же приветствием, и молчаливый увод клиента в чужой
+	// прокси - это обход, который ничего не обходит.
 	if (ProbeSocks5(port)) {
-		Core::App().setDpiProxyOverride(MakeSocksProxy(port));
-		g_applied = true;
-		return true;
+		const auto owner = State::Parse(State::Read(OwnershipPath()));
+		if (owner.valid && owner.port == port
+			&& ProcessAlive(owner.pid)
+			&& IsOurProxy(owner.pid)) {
+			// Процесс доказанно наш, поэтому берём его под управление: иначе
+			// teardown/stop его не погасят, и он останется висеть на порту
+			// после выключения тумблера.
+			g_pid = owner.pid;
+			Core::App().setDpiProxyOverride(MakeSocksProxy(port));
+			g_applied = true;
+			return true;
+		}
+		g_error = u"port %1 is already serving SOCKS5, but not by our proxy"_q.arg(port);
+		return false;
 	}
 
 	const auto executable = ExecutablePath();
@@ -190,6 +328,7 @@ void teardown() {
 	}
 	arguments.push_back(u"--config"_q);
 	arguments.push_back(strategy.isEmpty() ? QString(kDefaultStrategy) : strategy);
+	arguments.append(StealthArguments(AyuSettings::getInstance()));
 
 	qint64 pid = 0;
 	const auto launched = QProcess::startDetached(
@@ -209,6 +348,9 @@ void teardown() {
 	}
 
 	g_pid = pid;
+	// Запись владения: по ней следующий запуск отличит наш отцепившийся
+	// прокси от чужого сервиса на том же порту.
+	State::Write(OwnershipPath(), pid, port);
 	Core::App().setDpiProxyOverride(MakeSocksProxy(port));
 	g_applied = true;
 	return true;
@@ -241,15 +383,18 @@ void applyFromSettings() {
 	const auto port = settings.dpiPort();
 	if (port <= 0 || port > 65535) {
 		g_error = u"invalid port in settings"_q;
+		LOG(("AyuDpi: %1; bypass not started").arg(g_error));
 		return;
 	}
 
-	// Результат важен только для lastError, который bringUp уже заполняет.
-	// g_applied выставляется внутри на успехе, здесь он не нужен.
-	(void)bringUp(
-		static_cast<quint16>(port),
-		settings.dpiUseWebSocket(),
-		settings.dpiStrategy().trimmed());
+	// Результат bringUp сохранён в g_error; сама неудача больше не молчит: без
+	// записи в журнал выключенный обход выглядел бы как работающий.
+	if (!bringUp(
+			static_cast<quint16>(port),
+			settings.dpiUseWebSocket(),
+			settings.dpiStrategy().trimmed())) {
+		LOG(("AyuDpi: %1; bypass not started").arg(g_error));
+	}
 }
 
 void stop() {
@@ -260,7 +405,23 @@ void stop() {
 	// Переопределение тут не снимается: stop() зовётся на завершении клиента,
 	// когда трогать прокси уже нечего, а Core::App в этот момент разрушается.
 	// Гасим только процесс, чтобы он не пережил клиент и не занял порт.
+	State::Remove(OwnershipPath());
 	g_applied = false;
+}
+
+void restartFromSettings() {
+	if (!Core::IsAppLaunched()) {
+		return;
+	}
+	// Смена стелса/транспорта читается процессом только при подъёме, поэтому
+	// поднятый процесс гасится вместе с переопределением (teardown это делает)
+	// и поднимается заново уже с новыми аргументами. Когда обход выключен,
+	// g_applied ложь, teardown не зовётся, и applyFromSettings просто ничего не
+	// поднимает. Так один сеттер обслуживает и включение, и смену политики.
+	if (g_applied) {
+		teardown();
+	}
+	applyFromSettings();
 }
 
 bool running() {

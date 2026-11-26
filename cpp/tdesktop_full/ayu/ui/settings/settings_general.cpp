@@ -7,6 +7,7 @@
 #include "ayu/ui/settings/settings_general.h"
 
 #include "lang_auto.h"
+#include "ayu/ayu_power.h"
 #include "ayu/ayu_settings.h"
 #include "ayu/ui/settings/ayu_builder.h"
 #include "ayu/ui/settings/settings_ayu_utils.h"
@@ -34,6 +35,7 @@ using namespace AyuBuilder;
 namespace {
 
 void BuildDpiBypass(SectionBuilder &builder, AyuSectionBuilder &ayu);
+void BuildPowerSavingThreshold(SectionBuilder &builder, AyuSectionBuilder &ayu);
 
 void BuildTranslator(SectionBuilder &builder, AyuSectionBuilder &ayu) {
 	builder.addSubsectionTitle(tr::lng_translate_settings_subtitle());
@@ -312,6 +314,10 @@ void BuildQoLToggles(SectionBuilder &builder, AyuSectionBuilder &ayu) {
 	});
 
 	BuildDpiBypass(builder, ayu);
+
+	ayu.addSectionDivider();
+
+	BuildPowerSavingThreshold(builder, ayu);
 }
 
 void BuildDpiBypass(SectionBuilder &builder, AyuSectionBuilder &ayu) {
@@ -324,15 +330,41 @@ void BuildDpiBypass(SectionBuilder &builder, AyuSectionBuilder &ayu) {
 		.setter = &AyuSettings::setUseDpiBypass,
 	});
 
-	ayu.addSettingToggle({
-		.id = u"ayu/dpiUseWebSocket"_q,
-		.title = tr::ayu_DpiBypassWebSocket(),
-		.getter = &AyuSettings::dpiUseWebSocket,
-		.setter = &AyuSettings::setDpiUseWebSocket,
-		.shown = AyuSettings::getInstance().useDpiBypassValue(),
-	});
+	// Тумблеры стелса, профиль TLS и «Route via WSS» живут только в боксе прокси
+	// (boxes/connection_box.cpp). Раньше они дублировались и здесь, из-за чего
+	// одна настройка имела два места правки. Канон один: бокс.
 
 	builder.addDividerText(tr::ayu_DpiBypassDescription());
+}
+
+// Автопорог батареи из беты (`LiteMode.LowPower`): процент заряда, ниже
+// которого Power Saving включается сам. Существующий экран Power Saving в
+// C++ не трогаем: там свои чекбоксы флагов, и порог к ним не относится. Живёт
+// он здесь, в Ayu-секции, рядом с прочими доработками. Ползунок ступенчатый,
+// шкала 0..kMaxLowPowerThreshold, где 0 значит "никогда".
+void BuildPowerSavingThreshold(SectionBuilder &builder, AyuSectionBuilder &ayu) {
+	auto *settings = &AyuSettings::getInstance();
+
+	builder.addSubsectionTitle(tr::ayu_PowerSavingHeader());
+
+	ayu.addSlider({
+		.id = u"ayu/powerSavingLowPowerThreshold"_q,
+		.title = tr::ayu_PowerSavingThreshold(),
+		.steps = Ayu::Power::kMaxLowPowerThreshold + 1,
+		.current = settings->powerSavingLowPowerThreshold(),
+		.indexToValue = [](int index) { return index; },
+		.onFinalChanged = [](int index) {
+			AyuSettings::getInstance().setPowerSavingLowPowerThreshold(index);
+		},
+		.formatLabel = [](int index) {
+			return (index <= 0)
+				? tr::ayu_PowerSavingThresholdNever(tr::now)
+				: tr::ayu_PowerSavingThresholdPercent(tr::now, lt_count, index);
+		},
+	});
+
+	builder.addSkip();
+	builder.addDividerText(tr::ayu_PowerSavingThresholdAbout());
 }
 
 const auto kMeta = BuildHelper({

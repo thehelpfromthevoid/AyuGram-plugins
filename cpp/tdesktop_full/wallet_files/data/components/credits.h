@@ -36,10 +36,11 @@ public:
 	[[nodiscard]] CreditsAmount tonBalance() const;
 	[[nodiscard]] rpl::producer<CreditsAmount> tonBalanceValue() const;
 
-	// The TON wallet: the address of the wallet as reported by
-	// wallet.getState. The address stays empty if the account has no
-	// wallet yet (walletStateEmpty). Transaction history is not duplicated
-	// here: it already comes from Api::CreditsHistory with the TON flag.
+	// The TON wallet: forwards to Data::Wallet, which is the single owner of
+	// the wallet.getState request and of the resulting state. The address
+	// stays empty if the account has no wallet yet (walletStateEmpty).
+	// Transaction history is not duplicated here: it already comes from
+	// Api::CreditsHistory with the TON flag.
 	void walletLoad(bool force = false);
 	[[nodiscard]] bool walletLoaded() const;
 	[[nodiscard]] rpl::producer<bool> walletLoadedValue() const;
@@ -82,13 +83,6 @@ private:
 	rpl::event_stream<> _tonLoadedChanges;
 	crl::time _tonLastLoaded = false;
 	mtpRequestId _tonRequestId = 0;
-
-	QString _walletAddress;
-	bool _walletExists = false;
-	rpl::variable<bool> _walletStateLoaded = false;
-	rpl::variable<QString> _walletAddressValue;
-	mtpRequestId _walletRequestId = 0;
-	crl::time _walletLastLoaded = 0;
 
 	bool _statsEnabled = false;
 

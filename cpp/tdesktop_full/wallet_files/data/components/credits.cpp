@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "apiwrap.h"
 #include "api/api_credits.h"
+#include "data/components/wallet.h"
 #include "data/data_user.h"
 #include "lang/lang_keys.h"
 #include "main/main_app_config.h"
@@ -152,56 +153,30 @@ rpl::producer<CreditsAmount> Credits::tonBalanceValue() const {
 }
 
 void Credits::walletLoad(bool force) {
-	if (_walletRequestId
-		|| (!force
-			&& _walletLastLoaded
-			&& _walletLastLoaded + kReloadThreshold > crl::now())) {
-		return;
-	}
-	_walletRequestId = _session->api().request(
-		MTPwallet_GetState()
-	).done([=](const MTPWalletState &result) {
-		_walletRequestId = 0;
-		_walletLastLoaded = crl::now();
-		result.match([&](const MTPDwalletState &data) {
-			_walletExists = true;
-			_walletAddress = qs(data.vaddress().v);
-			_walletAddressValue = _walletAddress;
-		}, [&](const MTPDwalletStateEmpty &data) {
-			// No wallet created for this account yet. Keep the row visible
-			// but make it clear there is no address to show.
-			_walletExists = false;
-			_walletAddress = QString();
-			_walletAddressValue = QString();
-		});
-		_walletStateLoaded = true;
-	}).fail([=](const MTP::Error &error) {
-		_walletRequestId = 0;
-		_walletLastLoaded = crl::now();
-		LOG(("API Error: Couldn't get TON wallet state, error: %1"
-			).arg(error.type()));
-		_walletStateLoaded = true;
-	}).send();
+	_session->wallet().load(force);
 }
 
 bool Credits::walletLoaded() const {
-	return _walletStateLoaded.current();
+	return _session->wallet().loaded();
 }
 
 rpl::producer<bool> Credits::walletLoadedValue() const {
-	return _walletStateLoaded.value();
+	return _session->wallet().loadedValue();
 }
 
 const QString &Credits::walletAddress() const {
-	return _walletAddress;
+	return _session->wallet().state().address;
 }
 
 rpl::producer<QString> Credits::walletAddressValue() const {
-	return _walletAddressValue.value();
+	return _session->wallet().stateValue(
+	) | rpl::map([](const WalletState &state) {
+		return state.address;
+	}) | rpl::distinct_until_changed();
 }
 
 bool Credits::walletExists() const {
-	return _walletExists;
+	return _session->wallet().state().exists;
 }
 
 void Credits::updateNonLockedValue() {

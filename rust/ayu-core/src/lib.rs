@@ -6,6 +6,8 @@
 
 pub mod dpi;
 pub mod filter;
+pub mod gram;
 pub mod hash;
 pub mod manifest;
+pub mod power;
 pub mod settings;

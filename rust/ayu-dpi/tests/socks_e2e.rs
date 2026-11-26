@@ -11,6 +11,7 @@ use std::thread;
 use std::time::Duration;
 
 use ayu_core::dpi::options::parse_line;
+use ayu_core::dpi::stealth::{ClientHelloFragmentation, StealthOptions};
 use ayu_dpi::{OwnedResources, Proxy};
 
 /// A SOCKS5 client that connects and returns the stream after the reply.
@@ -37,8 +38,13 @@ fn socks_connect(proxy_addr: std::net::SocketAddr, host: &str, port: u16) -> Tcp
 /// Starts a proxy on an ephemeral port with the given config; returns its
 /// address and a shutdown handle.
 fn start_proxy(config_line: &str) -> (std::net::SocketAddr, Proxy) {
+    start_proxy_with(config_line, StealthOptions::default())
+}
+
+/// Same as `start_proxy` with an explicit stealth option set.
+fn start_proxy_with(config_line: &str, stealth: StealthOptions) -> (std::net::SocketAddr, Proxy) {
     let cfg = parse_line(config_line);
-    let proxy = Proxy::new(cfg, OwnedResources::default()).expect("proxy");
+    let proxy = Proxy::with_options(cfg, OwnedResources::default(), false, stealth).expect("proxy");
     let listener = TcpListener::bind("127.0.0.1:0").expect("reserve port");
     let addr = listener.local_addr().unwrap();
     drop(listener);
@@ -125,4 +131,94 @@ fn the_engine_reports_a_split_for_the_first_record() {
     assert_eq!(chunks.len(), 2);
     assert_eq!(chunks[0], b"a");
     assert_eq!(chunks[1], b"bcdef");
+}
+
+/// A hello-shaped buffer with a parseable SNI, padded past the 384-byte floor
+/// the stealth fragmentation needs.
+fn stealth_hello(host: &[u8]) -> Vec<u8> {
+    let mut hello = vec![
+        0x16, 0x03, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x03,
+    ];
+    hello.extend_from_slice(&[0u8; 32]);
+    hello.push(0);
+    hello.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
+    hello.push(1);
+    hello.push(0);
+    let mut sni = Vec::new();
+    sni.extend_from_slice(&[0x00, 0x00]);
+    sni.extend_from_slice(&(host.len() as u16 + 5).to_be_bytes());
+    sni.extend_from_slice(&(host.len() as u16 + 3).to_be_bytes());
+    sni.push(0);
+    sni.extend_from_slice(&(host.len() as u16).to_be_bytes());
+    sni.extend_from_slice(host);
+    hello.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+    hello.extend_from_slice(&sni);
+    while hello.len() < 400 {
+        hello.push(0);
+    }
+    let hs_len = hello.len() - 5 - 4;
+    hello[6] = (hs_len >> 16) as u8;
+    hello[7] = (hs_len >> 8) as u8;
+    hello[8] = hs_len as u8;
+    let rec_len = hello.len() - 5;
+    hello[3] = (rec_len >> 8) as u8;
+    hello[4] = rec_len as u8;
+    hello
+}
+
+#[test]
+fn stealth_fragmentation_sends_the_hello_as_two_separate_pieces() {
+    // An upstream that reads twice: the first read must return only the first
+    // piece, which is the whole point of the soft fragmentation.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind echo");
+    let upstream = listener.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            let mut first = vec![0u8; 4096];
+            let n = stream.read(&mut first).unwrap_or(0);
+            first.truncate(n);
+            let _ = tx.send(first);
+            let mut rest = Vec::new();
+            let _ = stream.read_to_end(&mut rest);
+            let _ = tx.send(rest);
+        }
+    });
+
+    // A rule with no split positions, so the strategy leaves the first payload
+    // whole and the stealth fragmentation is what cuts it.
+    let stealth = StealthOptions {
+        client_hello_fragmentation: ClientHelloFragmentation::Soft,
+        ..StealthOptions::default()
+    };
+    let config = format!("--filter-tcp={} --dpi-desync=fake", upstream.port());
+    let (proxy_addr, proxy) = start_proxy_with(&config, stealth);
+
+    let payload = stealth_hello(b"fragment.test");
+    let mut client = socks_connect(proxy_addr, "127.0.0.1", upstream.port());
+    client.write_all(&payload).unwrap();
+    client.flush().unwrap();
+
+    let first = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first piece");
+    assert!(!first.is_empty(), "first read returned nothing");
+    assert!(
+        first.len() < payload.len(),
+        "expected a split, got the whole {} bytes in one read",
+        first.len()
+    );
+    assert_eq!(first, payload[..first.len()], "first piece is a prefix");
+
+    drop(client); // EOF -> upstream read_to_end returns
+    let rest = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("second piece");
+    let mut joined = first.clone();
+    joined.extend_from_slice(&rest);
+    assert_eq!(joined, payload, "pieces join back to the original hello");
+    proxy.request_shutdown();
 }

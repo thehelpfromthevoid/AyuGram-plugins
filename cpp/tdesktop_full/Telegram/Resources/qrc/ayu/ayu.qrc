@@ -1,0 +1,52 @@
+<RCC>
+    <qresource prefix="/gui">
+        <file alias="art/ayu/alt/app.svg">../../art/ayu/alt/app.svg</file>
+        <file alias="art/ayu/alt/app_icon.ico">../../art/ayu/alt/app_icon.ico</file>
+        <file alias="art/ayu/bard/app.svg">../../art/ayu/bard/app.svg</file>
+        <file alias="art/ayu/bard/app_icon.ico">../../art/ayu/bard/app_icon.ico</file>
+        <file alias="art/ayu/chibi/app.png">../../art/ayu/chibi/app.png</file>
+        <file alias="art/ayu/chibi/app_icon.ico">../../art/ayu/chibi/app_icon.ico</file>
+        <file alias="art/ayu/chibi2/app.png">../../art/ayu/chibi2/app.png</file>
+        <file alias="art/ayu/chibi2/app_icon.ico">../../art/ayu/chibi2/app_icon.ico</file>
+        <file alias="art/ayu/default/app.svg">../../art/ayu/default/app.svg</file>
+        <file alias="art/ayu/default/app_icon.ico">../../art/ayu/default/app_icon.ico</file>
+        <file alias="art/ayu/discord/app.svg">../../art/ayu/discord/app.svg</file>
+        <file alias="art/ayu/discord/app_icon.ico">../../art/ayu/discord/app_icon.ico</file>
+        <file alias="art/ayu/extera/app.svg">../../art/ayu/extera/app.svg</file>
+        <file alias="art/ayu/extera/app_icon.ico">../../art/ayu/extera/app_icon.ico</file>
+        <file alias="art/ayu/extera2/app.svg">../../art/ayu/extera2/app.svg</file>
+        <file alias="art/ayu/extera2/app_icon.ico">../../art/ayu/extera2/app_icon.ico</file>
+        <file alias="art/ayu/nothing/app.svg">../../art/ayu/nothing/app.svg</file>
+        <file alias="art/ayu/nothing/app_icon.ico">../../art/ayu/nothing/app_icon.ico</file>
+        <file alias="art/ayu/spotify/app.svg">../../art/ayu/spotify/app.svg</file>
+        <file alias="art/ayu/spotify/app_icon.ico">../../art/ayu/spotify/app_icon.ico</file>
+        <file alias="art/ayu/win95/app.png">../../art/ayu/win95/app.png</file>
+        <file alias="art/ayu/win95/app_icon.ico">../../art/ayu/win95/app_icon.ico</file>
+        <file alias="art/ayu/yaplus/app.svg">../../art/ayu/yaplus/app.svg</file>
+        <file alias="art/ayu/yaplus/app_icon.ico">../../art/ayu/yaplus/app_icon.ico</file>
+        <file alias="icons/ayu/nocover.svg">../../icons/ayu/nocover.svg</file>
+        <file alias="icons/ayu/donates/boosty.svg">../../icons/ayu/donates/boosty.svg</file>
+        <file alias="icons/ayu/donates/ton.svg">../../icons/ayu/donates/ton.svg</file>
+        <file alias="icons/ayu/donates/bitcoin.svg">../../icons/ayu/donates/bitcoin.svg</file>
+        <file alias="icons/ayu/donates/ethereum.svg">../../icons/ayu/donates/ethereum.svg</file>
+        <file alias="icons/ayu/donates/solana.svg">../../icons/ayu/donates/solana.svg</file>
+        <file alias="icons/ayu/donates/tron.svg">../../icons/ayu/donates/tron.svg</file>
+        <file alias="icons/ayu/donates/support_logo.svg">../../icons/ayu/donates/support_logo.svg</file>
+    </qresource>
+    <qresource prefix="/ayu">
+        <file alias="plugins/com.ayugram.hello-toast/plugin.json">../../../SourceFiles/ayu/plugins/examples/hello-toast/plugin.json</file>
+        <file alias="plugins/com.ayugram.hello-toast/main.py">../../../SourceFiles/ayu/plugins/examples/hello-toast/main.py</file>
+        <file alias="plugins/com.ayugram.translator-demo/plugin.json">../../../SourceFiles/ayu/plugins/examples/translator/plugin.json</file>
+        <file alias="plugins/com.ayugram.translator-demo/main.py">../../../SourceFiles/ayu/plugins/examples/translator/main.py</file>
+        <file alias="plugins/com.ayugram.antidelete/plugin.json">../../../SourceFiles/ayu/plugins/examples/antidelete/plugin.json</file>
+        <file alias="plugins/com.ayugram.antidelete/main.py">../../../SourceFiles/ayu/plugins/examples/antidelete/main.py</file>
+        <file alias="plugins/com.ayugram.macros/plugin.json">../../../SourceFiles/ayu/plugins/examples/macros/plugin.json</file>
+        <file alias="plugins/com.ayugram.macros/main.py">../../../SourceFiles/ayu/plugins/examples/macros/main.py</file>
+        <file alias="plugins/world_time/plugin.json">../../../SourceFiles/ayu/plugins/examples/world_time/plugin.json</file>
+        <file alias="plugins/world_time/main.py">../../../SourceFiles/ayu/plugins/examples/world_time/main.py</file>
+        <file alias="plugins/scam_base_writer/plugin.json">../../../SourceFiles/ayu/plugins/examples/scam_base_writer/plugin.json</file>
+        <file alias="plugins/scam_base_writer/main.py">../../../SourceFiles/ayu/plugins/examples/scam_base_writer/main.py</file>
+        <file alias="plugins/animtou/plugin.json">../../../SourceFiles/ayu/plugins/examples/animtou/plugin.json</file>
+        <file alias="plugins/animtou/main.py">../../../SourceFiles/ayu/plugins/examples/animtou/main.py</file>
+    </qresource>
+</RCC>
