@@ -8,7 +8,7 @@ AyuGram Desktop - клиент Telegram для десктопа на базе Te
 - **Открытые исходники C++** (3 источника: tdesktop, AyuGram-OpenSource, tdesktop_full) - в папке `cpp/`
 - **Python standalone host** - отдельный Python-клиент для разработки и тестирования плагинов
 - **Документацию** - BUILD_OWNERSHIP.md, API reference, quickstart и др.
-- **Готовую сборку** - Release-бинарник в разделе Releases (тег v1.0.0)
+- **Готовую сборку** - Release-бинарник в разделе Releases (тег v1.3.0)
 
 Автор: @CE0fbi
 
@@ -151,10 +151,22 @@ run_build_release.bat
 
 **Требования:** Visual Studio 2022 Community, CMake, Qt (включён в ThirdParty).
 
+## Что нового в v1.3.0
+
+- Отправка GRAM из кошелька: сборка и подпись TON-транзакции. Тело v4r2 строится
+  в Rust-крейте `ayu-wallet` (BIP39, ed25519, TON cell/BOC), номер seqno читается
+  через jsonRPC `runGetMethod` на toncenter, готовая ячейка уходит в
+  `wallet.sendTransfer`. Кнопка Send, экран деталей и экран чужого кошелька.
+- Обход DPI: углублён SOCKS5-релей, добавлена TLS-фрагментация с темпом
+  (`pace`), новые настройки стелса (split/pace) в настройках DPI.
+- Rust-ядро: новый крейт `ayu-wallet`, модуль `gram` для анонимного трансфера,
+  `ayu-chatparser` в воркспейсе, `ayu_fast.dll` связан со слоем.
+- Исходники C++ под `cpp/tdesktop_full/` обновлены из сборочного дерева.
+
 ## Релиз-бинарник
 
 Готовая сборка: `D:\TBuild\tdesktop\out\Release\AyuGram.exe` (228 МБ)
-Не коммитится в git из-за размера (.gitignore исключает .exe). Доступен локально и в GitHub Releases (тег v1.0.0).
+Не коммитится в git из-за размера (.gitignore исключает .exe). Доступен локально и в GitHub Releases (тег v1.3.0).
 
 ## tdata - файлы авторизации
 
